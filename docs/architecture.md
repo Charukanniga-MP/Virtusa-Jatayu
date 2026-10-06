@@ -181,9 +181,68 @@ Floating-point arithmetic (IEEE 754) is strictly prohibited for monetary values 
 
 ---
 
-## 5. Component Status Matrix (Day 1, 2, 3 & 4 vs. Planned)
+## 5. Day 5 Fuzzy Ledger Reconciliation & Intelligent Candidate Matching
 
-| Component | Status | Day 1–4 Implementation Scope | Planned Full Scope (Days 5–15) |
+Day 5 introduces a deterministic fuzzy candidate-matching layer that identifies likely ledger entries when transaction and ledger records are not exact matches (due to reference formatting drift, minor payment processing fee tolerances, or timestamp network latencies).
+
+### Architecture Flow
+
+```text
+                 Transaction
+                      |
+                      v
+              Candidate Discovery
+                      |
+                      v
+               Hard Constraints
+                      |
+                      v
+              Fuzzy Candidate Ranker
+                      |
+          +-----------+-----------+
+          |                       |
+          v                       v
+      Clear Winner            Ambiguous
+          |                       |
+          v                       v
+ Deterministic Engine      Manual Review
+          |
+          v
+ Reconciliation Result
+```
+
+### Critical Financial Safety Principle
+> **Fuzzy matching is used only for candidate discovery. Final financial reconciliation remains deterministic and explainable.**
+> The fuzzy candidate matcher is strictly a discovery mechanism. It never alters ledger records, never adjusts financial values, and never directly marks a transaction as `MATCHED`. The authoritative financial decision is always evaluated by the deterministic `ReconciliationEngine`.
+
+### Key Design Pillars
+
+1. **Safe Normalization (`reconciliation/normalization.py`):**
+   - Reference codes: Whitespace and punctuation (`[\s\-_.]+`) stripped, converted to uppercase (`PAY-ABC-123` -> `PAYABC123`).
+   - Account numbers: Leading/trailing whitespace trimmed, prefixes normalized, but **all meaningful digits are strictly preserved**. Digits are never stripped or altered.
+   - ISO 4217 Currency: Normalized to uppercase 3-letter codes.
+
+2. **Multi-Field Similarity Scoring (`reconciliation/fuzzy_matcher.py`):**
+   - Configurable weights: Reference (30%), Account (25%), Amount (25%), Timestamp Window (15%), Currency (5%).
+   - Numerical Decimal comparison for amounts (absolute and relative tolerance).
+   - Timestamp decay over configurable window (`FUZZY_TIMESTAMP_WINDOW_SECONDS = 900`).
+
+3. **Non-Negotiable Hard Constraints:**
+   - Incompatible account IDs or incompatible currencies are hard-rejected (`REJECTED`, candidate score = 0.0). Even a 100% identical reference ID cannot override an account or currency mismatch.
+
+4. **Ambiguity Detection & Human Review:**
+   - If `top_score - second_score < AMBIGUITY_MARGIN (0.03)`, candidate selection status is marked as `AMBIGUOUS`.
+   - The transaction is flagged with `requires_manual_review = True` and held for human compliance review.
+
+5. **Two-Stage Reconciliation Pipeline:**
+   - **Stage 1 (Discovery):** `CandidateService` retrieves candidate pool from indexed SQLite queries and ranks them using `FuzzyCandidateMatcher`, emitting `FUZZY_CANDIDATE_IDENTIFIED`.
+   - **Stage 2 (Financial Verification):** Selected top candidate is passed to `ReconciliationEngine` for final deterministic verification (`MATCHED`, `PARTIAL_MATCH`, `MISMATCHED`, or `NOT_FOUND`).
+
+---
+
+## 6. Component Status Matrix (Days 1–5 vs. Planned)
+
+| Component | Status | Day 1–5 Implementation Scope | Planned Full Scope (Days 6–15) |
 | :--- | :--- | :--- | :--- |
 | **Transaction Sources** | **IMPLEMENTED (Day 2)** | Deterministic synthetic generator `TransactionGenerator` with multi-channel and multi-currency simulation. | Continuous streaming load injector with anomaly burst modes. |
 | **Event Ingestion Layer** | **IMPLEMENTED (Day 2)** | `TransactionService` coordinating validation, SQLite persistence, and decoupled event publishing via `POST /transactions` and `POST /transactions/simulate`. | Distributed streaming ingestion gateways with TLS token authentication. |
@@ -191,37 +250,38 @@ Floating-point arithmetic (IEEE 754) is strictly prohibited for monetary values 
 | **Event Orchestrator** | **IMPLEMENTED (Day 3)** | Decoupled event bus with dynamic handler registry (`register_handler`, `unregister_handler`), idempotency deduplication (`_processed_event_ids`), bounded retries (`MAX_EVENT_RETRIES`), sync/async non-blocking handler support, and full audit trail. | Distributed Apache Kafka topics, consumer groups, partition management, DLQs. |
 | **Workflow State Tracker** | **IMPLEMENTED (Day 3)** | Thread-safe `WorkflowTracker` tracking status (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`) and stage breakdowns (`validation`, `reconciliation`, `fraud_analysis`, `risk_analysis`, `final_decision`). | Persistent Redis / distributed state cache with timeout monitors. |
 | **Event Audit Trail** | **IMPLEMENTED (Day 3)** | Thread-safe `EventAuditTrail` capturing immutable records with statuses (`RECEIVED`, `PROCESSING`, `COMPLETED`, `FAILED`, `DUPLICATE`) and causation lineage. | Append-only cryptographically signed ledger audit log (Day 8). |
-| **Processing Pipeline** | **IMPLEMENTED (Day 3-4)** | `ProcessingPipeline` chaining canonical banking event stages, now dynamically invoking `ReconciliationService` on reconciliation requests. | Full multi-agent evaluation pipeline with AI scoring and consensus. |
-| **Reconciliation Engine** | **IMPLEMENTED (Day 4)** | Deterministic `ReconciliationEngine`, 7 banking rules, Decimal financial arithmetic, explainable evidence generation, `LedgerRepository`, `LedgerGenerator`, and REST APIs. | Fuzzy reconciliation algorithms, multi-account splits, and out-of-order resolution (Day 5). |
+| **Processing Pipeline** | **IMPLEMENTED (Day 3-5)** | `ProcessingPipeline` chaining canonical banking event stages, dynamically invoking two-stage `ReconciliationService` on reconciliation requests. | Full multi-agent evaluation pipeline with AI scoring and consensus. |
+| **Reconciliation Engine** | **IMPLEMENTED (Day 4-5)** | Two-stage architecture: `CandidateService` + `FuzzyCandidateMatcher` (Stage 1) and deterministic `ReconciliationEngine` (Stage 2) with 7 banking rules, Decimal arithmetic, explainability, ambiguity detection, and manual review flags. | Multi-account split reconciliation and automated reversal generation (Day 10). |
 | **Fraud Agent** | **PLANNED** | Placeholder handler and schema foundation in `fraud_detection/models.py`. | Real-time feature extraction, velocity checking, ML anomaly scoring (Day 6). |
 | **Risk Agent** | **PLANNED** | Directory initialized (`agents/risk_agent`). | Multi-agent risk profiling & aggregate score weighting (Day 7). |
 | **Decision Engine** | **PLANNED** | Placeholder disposition handler (`TRANSACTION_APPROVED`). | Multi-agent consensus engine and automated disposition logic (Day 7). |
 | **Legacy System Simulator** | **IMPLEMENTED (Day 1)** | Deterministic `LegacyBankingSystem` simulating host approvals/rejections. | Full Shadow Deployment dual-run engine and discrepancy analysis (Day 9). |
-| **Investigation Queue** | **PLANNED** | Not implemented today. | Alert queuing, operator review hooks, and case management (Day 11). |
-| **Security Layer** | **IMPLEMENTED (Day 1)** | Account ID masking (`mask_account_id`), log sanitization, zero-trust log hygiene. | Mutual TLS, cryptographic signing, API gateway policies (Day 8). |
-| **Privacy Layer** | **PLANNED** | Zero-trust logging rule: strict ban on raw PII / account numbers in logs. | Differential privacy queries and cryptographic data tokenization (Day 8). |
-| **Database** | **IMPLEMENTED (Day 1-4)** | Local SQLite engine with idempotent schemas for transactions, ledger entries, and reconciliation results. | PostgreSQL / TimescaleDB support with high-throughput indexing (Day 8+). |
-| **Monitoring & Telemetry** | **IMPLEMENTED (Day 3-4)** | Structured logging + extended live `EventOrchestrator` execution metrics, audit traces, and reconciliation metrics (`GET /reconciliation/metrics`). | Distributed OpenTelemetry tracing and Prometheus metric exporters (Day 12). |
+| **Investigation Queue** | **PLANNED** | Initialized via `requires_manual_review = True` flags on ambiguous/unmatched reconciliation events. | Alert queuing, operator review console, and case management (Day 11). |
+| **Security Layer** | **IMPLEMENTED (Day 1-5)** | Account ID masking (`mask_account_id`), zero-trust log sanitization, safe normalization preserving account digits. | Mutual TLS, cryptographic signing, API gateway policies (Day 8). |
+| **Privacy Layer** | **PLANNED** | Zero-trust logging rule: strict ban on raw PII / account numbers in logs and fuzzy evidence. | Differential privacy queries and cryptographic data tokenization (Day 8). |
+| **Database** | **IMPLEMENTED (Day 1-5)** | Local SQLite engine with indexed candidate queries (`account_id`, `amount_range`, `timestamp_range`), migration support, and reconciliation persistence. | PostgreSQL / TimescaleDB support with high-throughput indexing (Day 8+). |
+| **Monitoring & Telemetry** | **IMPLEMENTED (Day 3-5)** | Structured logging + extended live `EventOrchestrator` execution metrics, audit traces, and reconciliation/candidate metrics (`GET /reconciliation/metrics`, `GET /reconciliation/candidates/{id}`). | Distributed OpenTelemetry tracing and Prometheus metric exporters (Day 12). |
 | **Dashboard** | **PLANNED** | Directory initialized (`dashboard/`). | Real-time operator triage console and reconciliation metrics UI (Day 11). |
 
-
 ---
 
-## 3. Data Flow & Zero-Trust Boundary
+## 7. Data Flow & Zero-Trust Boundary
 
-### Day 1 Implemented Flow:
-1. **Transaction Submission:** A client submits a JSON payload to `POST /transactions/validate`.
+### Implemented Flow:
+1. **Transaction Submission:** A client submits a JSON payload to `POST /transactions` or `POST /transactions/simulate`.
 2. **Schema & Business Validation:** Pydantic `Transaction` validates fields, positive amounts, 3-letter currency codes, and non-empty IDs.
-3. **Zero-Trust Sanitization:** Account identifiers are masked via `mask_account_id()` prior to output to system logs.
-4. **Local Event Dispatch:** The transaction is converted into an in-memory `Event` and routed via `EventOrchestrator` to registered placeholder handlers.
-5. **Database Storage:** Tables `transactions` and `ledger_entries` are maintained in SQLite with parameterized queries preventing SQL injection.
-6. **Legacy Host Simulation:** `LegacyBankingSystem` provides deterministic reference approvals/rejections (`00` vs `51` / `05`).
+3. **Zero-Trust Sanitization:** Account identifiers are masked via `mask_account_id()` prior to output to system logs and event audit records.
+4. **Local Event Dispatch:** The transaction is converted into an in-memory `Event` and routed via `EventOrchestrator` to registered handlers.
+5. **Candidate Discovery (Stage 1):** `CandidateService` retrieves potential candidates from indexed SQLite tables and ranks them via `FuzzyCandidateMatcher`. Emits `FUZZY_CANDIDATE_IDENTIFIED`.
+6. **Financial Verification (Stage 2):** Selected candidate is evaluated by deterministic `ReconciliationEngine`. Emits `TRANSACTION_RECONCILED`.
+7. **Database Storage:** Tables `transactions`, `ledger_entries`, and `reconciliation_results` are maintained in SQLite with parameterized queries preventing SQL injection.
 
 ---
 
-## 4. Architectural Decisions
+## 8. Architectural Decisions
 
-1. **No Docker / Local-First Python:** Entire Day 1 foundation is executable on standard Windows workstations using native Python virtual environments.
+1. **No Docker / Local-First Python:** Entire foundation is executable on standard Windows workstations using native Python virtual environments.
 2. **Decoupled Event Orchestration:** The `EventOrchestrator` defines an interface identical to pub/sub brokers, allowing drop-in Kafka replacement without refactoring downstream agents.
-3. **Separation of Transactions and Ledger Entries:** Transaction requests and ledger records are distinct Pydantic models to mirror real-world core banking and double-entry general ledgers.
+3. **Two-Stage Reconciliation Separation:** Fuzzy matching is strictly confined to candidate discovery. Authoritative financial reconciliation decisions are reserved for the deterministic engine.
 4. **Data Hygiene First:** Logging never prints raw account numbers; zero-trust principles are applied at the earliest design stage.
+

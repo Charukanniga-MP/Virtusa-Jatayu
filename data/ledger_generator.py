@@ -75,7 +75,17 @@ class LedgerGenerator:
         ts = base_ts + timedelta(seconds=30)
 
         # Apply Scenario Variations
-        if scenario == "amount_mismatch":
+        if scenario == "fuzzy_match":
+            # Reference formatting variation (lowercase with spaces), minor $0.01 cent variance
+            if ref_id:
+                ref_id = f" {ref_id.lower().replace('-', ' ')} "
+            amt = round(amt + 0.01, 2)
+            ts = base_ts + timedelta(seconds=120)
+        elif scenario == "unsafe_match":
+            # Same reference, but completely different account and currency
+            acc_id = f"ACC-{self._rng.randint(800000, 899999)}"
+            curr = "EUR" if curr != "EUR" else "GBP"
+        elif scenario == "amount_mismatch":
             # Amount differs by $50.00
             amt = round(amt + 50.00, 2)
         elif scenario == "currency_mismatch":
@@ -107,6 +117,44 @@ class LedgerGenerator:
             source_system=source_system,
         )
 
+    def generate_ambiguous_candidates(
+        self,
+        transaction: Transaction,
+    ) -> Tuple[LedgerEntry, LedgerEntry]:
+        """Generate two competing ledger entries with nearly identical similarity scores."""
+        self._counter += 1
+        id_a = f"LEDGER-AMB-A-{self._counter:06d}"
+        self._counter += 1
+        id_b = f"LEDGER-AMB-B-{self._counter:06d}"
+
+        base_ts = transaction.transaction_timestamp
+        if base_ts.tzinfo is None:
+            base_ts = base_ts.replace(tzinfo=timezone.utc)
+
+        cand_a = LedgerEntry(
+            ledger_entry_id=id_a,
+            transaction_id=transaction.transaction_id,
+            account_id=transaction.account_id,
+            amount=float(transaction.amount),
+            currency=transaction.currency,
+            debit_credit="DEBIT",
+            reference_id=f"{transaction.reference_id or 'REF-100'}-A",
+            timestamp=base_ts + timedelta(seconds=20),
+            source_system="GENERAL_LEDGER_CORE",
+        )
+        cand_b = LedgerEntry(
+            ledger_entry_id=id_b,
+            transaction_id=f"TXN-OTHER-{self._counter:06d}",
+            account_id=transaction.account_id,
+            amount=float(transaction.amount),
+            currency=transaction.currency,
+            debit_credit="DEBIT",
+            reference_id=f"{transaction.reference_id or 'REF-100'}-B",
+            timestamp=base_ts + timedelta(seconds=25),
+            source_system="GENERAL_LEDGER_CORE",
+        )
+        return cand_a, cand_b
+
     def generate_controlled_dataset(
         self,
         transactions: List[Transaction],
@@ -130,4 +178,48 @@ class LedgerGenerator:
 
             entry = self.generate_entry_for_transaction(tx, scenario=scenario)
             results.append((tx, entry, scenario))
+        return results
+
+    def generate_day5_dataset(
+        self,
+        transactions: List[Transaction],
+        exact_ratio: float = 0.50,
+        fuzzy_ratio: float = 0.25,
+        ambiguous_ratio: float = 0.10,
+        mismatch_ratio: float = 0.10,
+        missing_ratio: float = 0.05,
+    ) -> List[Tuple[Transaction, List[LedgerEntry], str]]:
+        """Generate a realistic dataset for Day 5 testing and benchmarking.
+
+        Produces:
+        - Exact matches: 1 identical ledger entry
+        - Fuzzy matches: 1 entry with reference/timestamp/amount formatting variation
+        - Ambiguous: 2 competing ledger entries within ambiguity score margin
+        - Mismatch: 1 entry with severe account/currency/amount mismatches
+        - Missing: 0 ledger entries
+        """
+        results = []
+        for tx in transactions:
+            roll = self._rng.random()
+            if roll < exact_ratio:
+                scenario = "exact"
+                entry = self.generate_entry_for_transaction(tx, scenario="exact")
+                entries = [entry] if entry else []
+            elif roll < exact_ratio + fuzzy_ratio:
+                scenario = "fuzzy_match"
+                entry = self.generate_entry_for_transaction(tx, scenario="fuzzy_match")
+                entries = [entry] if entry else []
+            elif roll < exact_ratio + fuzzy_ratio + ambiguous_ratio:
+                scenario = "ambiguous"
+                cand_a, cand_b = self.generate_ambiguous_candidates(tx)
+                entries = [cand_a, cand_b]
+            elif roll < exact_ratio + fuzzy_ratio + ambiguous_ratio + mismatch_ratio:
+                scenario = "mismatch"
+                entry = self.generate_entry_for_transaction(tx, scenario="severe_mismatch")
+                entries = [entry] if entry else []
+            else:
+                scenario = "missing"
+                entries = []
+
+            results.append((tx, entries, scenario))
         return results

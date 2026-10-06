@@ -65,10 +65,18 @@ This roadmap outlines the iterative engineering milestones for **ZT-LedgerGuard 
 
 ---
 
-### DAY 5: Fuzzy Reconciliation
-- Heuristic and probabilistic matching algorithms for out-of-order and partial transactions.
-- Multi-currency conversion drift and batch settlement reconciliation.
-- Confidence scoring for fuzzy match candidates.
+### DAY 5: Fuzzy Ledger Reconciliation & Intelligent Candidate Matching *(Completed)*
+- Deterministic, explainable fuzzy candidate matching layer strictly decoupled from final financial verification.
+- Safe field normalization in `reconciliation/normalization.py`: reference strings stripped and uppercased, currencies ISO 4217 validated, account numbers strictly preserved without altering meaningful digits.
+- Configurable candidate scoring in `reconciliation/fuzzy_matcher.py` with `FuzzyMatchWeights` (Reference: 30%, Account: 25%, Decimal Amount: 25%, Timestamp Proximity: 15%, Currency: 5%).
+- Non-negotiable hard constraints: mismatched account numbers or incompatible currencies immediately rejected with zero score, preventing unauthorized candidate matches.
+- Ambiguity detection with configurable `AMBIGUITY_MARGIN` (0.03): competing candidates flag selection as `AMBIGUOUS` and set `requires_manual_review = True`.
+- Two-stage reconciliation workflow: Stage 1 Candidate Discovery via `CandidateService` -> `FUZZY_CANDIDATE_IDENTIFIED` event -> Stage 2 Authoritative Financial Verification via deterministic `ReconciliationEngine`.
+- Enriched `ReconciliationStatus` with `AMBIGUOUS` state and `requires_manual_review` boolean flag.
+- Extended SQLite persistence with indexed candidate lookup methods (`find_candidates_by_account`, `find_candidates_by_reference`, `find_candidates_by_amount`, `find_candidates_by_time_window`).
+- REST endpoints: `POST /reconciliation/candidates` and `GET /reconciliation/candidates/{transaction_id}`.
+- 47 new comprehensive tests in `tests/test_day5.py` covering normalization, scoring, hard constraints, ambiguity, repository, workflow integration, APIs, and adversarial attacks (145/145 total suite passing).
+- 10,000-record benchmark in `scripts/benchmark_day5.py` achieving 3,073+ records/sec throughput.
 
 ---
 

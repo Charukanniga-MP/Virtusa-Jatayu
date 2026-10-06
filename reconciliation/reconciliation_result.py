@@ -19,6 +19,7 @@ class ReconciliationStatus(str, Enum):
     PARTIAL_MATCH = "PARTIAL_MATCH"
     MISMATCHED = "MISMATCHED"
     NOT_FOUND = "NOT_FOUND"
+    AMBIGUOUS = "AMBIGUOUS"
 
 
 class ReconciliationResult(BaseModel):
@@ -42,7 +43,7 @@ class ReconciliationResult(BaseModel):
     )
     status: str = Field(
         ...,
-        description="Reconciliation status: MATCHED, PARTIAL_MATCH, MISMATCHED, or NOT_FOUND",
+        description="Reconciliation status: MATCHED, PARTIAL_MATCH, MISMATCHED, NOT_FOUND, or AMBIGUOUS",
     )
     score: float = Field(
         ...,
@@ -65,6 +66,10 @@ class ReconciliationResult(BaseModel):
     evidence: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="Deterministic, non-LLM evidence records for each evaluated rule",
+    )
+    requires_manual_review: bool = Field(
+        default=False,
+        description="True if transaction or candidate match is ambiguous or requires manual compliance triage",
     )
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

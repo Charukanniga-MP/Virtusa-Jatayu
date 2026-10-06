@@ -12,15 +12,19 @@ from typing import Any, Dict, List, Optional
 from database.database import (
     get_all_reconciliation_results,
     get_connection,
+    get_ledger_entries_by_account_id,
+    get_ledger_entries_by_amount_range,
     get_ledger_entries_by_reference_id,
+    get_ledger_entries_by_timestamp_range,
     get_ledger_entries_by_transaction_id,
     get_ledger_entry_by_id,
+    get_potential_candidate_ledger_entries,
     get_reconciliation_result_by_id,
     init_db,
     insert_ledger_entry,
     insert_reconciliation_result,
 )
-from reconciliation.models import LedgerEntry
+from reconciliation.models import LedgerEntry, Transaction
 from reconciliation.reconciliation_result import ReconciliationResult, ReconciliationStatus
 
 logger = logging.getLogger("reconciliation.ledger_repository")
@@ -77,6 +81,71 @@ class LedgerRepository:
                 return None
             return self._row_to_ledger_entry(rows[0])
 
+    def find_candidates_by_account(self, account_id: str, limit: int = 50) -> List[LedgerEntry]:
+        """Find candidate LedgerEntry records matching an account ID."""
+        if not account_id:
+            return []
+        with get_connection(self.db_path) as conn:
+            rows = get_ledger_entries_by_account_id(conn, account_id, limit=limit)
+            return [self._row_to_ledger_entry(r) for r in rows]
+
+    def find_candidates_by_reference(self, reference_id: str, limit: int = 50) -> List[LedgerEntry]:
+        """Find all candidate LedgerEntry records matching a reference ID."""
+        if not reference_id:
+            return []
+        with get_connection(self.db_path) as conn:
+            rows = get_ledger_entries_by_reference_id(conn, reference_id)
+            return [self._row_to_ledger_entry(r) for r in rows[:limit]]
+
+    def find_candidates_by_amount(
+        self,
+        amount: float,
+        tolerance: float = 10.0,
+        limit: int = 50,
+    ) -> List[LedgerEntry]:
+        """Find candidate LedgerEntry records within a monetary amount window."""
+        min_amt = max(0.0, float(amount) - float(tolerance))
+        max_amt = float(amount) + float(tolerance)
+        with get_connection(self.db_path) as conn:
+            rows = get_ledger_entries_by_amount_range(conn, min_amt, max_amt, limit=limit)
+            return [self._row_to_ledger_entry(r) for r in rows]
+
+    def find_candidates_by_time_window(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        limit: int = 50,
+    ) -> List[LedgerEntry]:
+        """Find candidate LedgerEntry records posted within a datetime window."""
+        start_iso = start_time.isoformat()
+        end_iso = end_time.isoformat()
+        with get_connection(self.db_path) as conn:
+            rows = get_ledger_entries_by_timestamp_range(conn, start_iso, end_iso, limit=limit)
+            return [self._row_to_ledger_entry(r) for r in rows]
+
+    def find_potential_candidates(
+        self,
+        transaction: Transaction,
+        amount_tolerance: float = 50.0,
+        limit: int = 100,
+    ) -> List[LedgerEntry]:
+        """Discover potential candidate ledger entries across ID, reference, account, and amount."""
+        amt = float(transaction.amount)
+        min_amt = max(0.0, amt - amount_tolerance)
+        max_amt = amt + amount_tolerance
+
+        with get_connection(self.db_path) as conn:
+            rows = get_potential_candidate_ledger_entries(
+                conn=conn,
+                transaction_id=transaction.transaction_id,
+                reference_id=transaction.reference_id,
+                account_id=transaction.account_id,
+                min_amount=min_amt,
+                max_amount=max_amt,
+                limit=limit,
+            )
+            return [self._row_to_ledger_entry(r) for r in rows]
+
     # --------------------------------------------------------------------------
     # Reconciliation Result Operations
     # --------------------------------------------------------------------------
@@ -93,6 +162,7 @@ class LedgerRepository:
             "mismatched_fields": json.dumps(result.mismatched_fields),
             "mismatch_reasons": json.dumps(result.mismatch_reasons),
             "evidence": json.dumps(result.evidence),
+            "requires_manual_review": result.requires_manual_review,
             "timestamp": result.timestamp.isoformat(),
         }
         with get_connection(self.db_path) as conn:
@@ -195,5 +265,6 @@ class LedgerRepository:
             mismatched_fields=mismatched,
             mismatch_reasons=reasons,
             evidence=evidence,
+            requires_manual_review=bool(row.get("requires_manual_review", 0)),
             timestamp=dt,
         )

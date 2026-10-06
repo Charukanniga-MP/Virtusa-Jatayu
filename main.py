@@ -111,6 +111,12 @@ class ReconciliationRunRequest(BaseModel):
     transaction_id: str = Field(..., description="Target transaction ID to reconcile against the ledger")
 
 
+class CandidateDiscoveryRequest(BaseModel):
+    """Request model for fuzzy candidate discovery and ranking."""
+
+    transaction_id: str = Field(..., description="Target transaction ID to discover candidate ledger entries for")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle management: initialize DB and register handlers."""
@@ -330,6 +336,40 @@ def run_reconciliation_endpoint(request: ReconciliationRunRequest) -> Dict[str, 
             detail=f"Transaction '{request.transaction_id}' not found.",
         )
     return result.model_dump()
+
+
+@app.post(
+    "/reconciliation/candidates",
+    tags=["Reconciliation"],
+    summary="Discover and Rank Ledger Candidates",
+    status_code=status.HTTP_200_OK,
+)
+def discover_candidates_endpoint(request: CandidateDiscoveryRequest) -> Dict[str, Any]:
+    """Execute fuzzy candidate discovery and ranking for a transaction."""
+    discovery = reconciliation_service.discover_candidates_by_transaction_id(request.transaction_id)
+    if discovery is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction '{request.transaction_id}' not found.",
+        )
+    return discovery.model_dump()
+
+
+@app.get(
+    "/reconciliation/candidates/{transaction_id}",
+    tags=["Reconciliation"],
+    summary="Get Ranked Candidates for a Transaction",
+    status_code=status.HTTP_200_OK,
+)
+def get_candidates_endpoint(transaction_id: str) -> Dict[str, Any]:
+    """Retrieve ranked candidate ledger entries and explainable similarity evidence."""
+    discovery = reconciliation_service.discover_candidates_by_transaction_id(transaction_id)
+    if discovery is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction '{transaction_id}' not found.",
+        )
+    return discovery.model_dump()
 
 
 @app.get(

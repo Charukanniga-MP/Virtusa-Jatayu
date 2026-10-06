@@ -35,7 +35,7 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 
 ---
 
-## Current Status: Day 1, Day 2, Day 3 & Day 4 Completed (98/98 Tests Passing)
+## Current Status: Days 1, 2, 3, 4 & 5 Completed (145/145 Tests Passing)
 
 ### Day 1 — Foundation & Architecture
 - **Project Architecture & Layout:** Modular package structure with isolated agent directories, orchestrator, legacy simulator, and database layers.
@@ -72,6 +72,16 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 - **Explainable Evidence Generation:** Every rule produces transparent human-auditable evidence dictionaries stating compared values, status, and exact delta (e.g. amount variance or timestamp delta).
 - **Decoupled Repository & Generator:** `LedgerRepository` abstraction managing SQLite persistence for general ledger entries and reconciliation records. `LedgerGenerator` producing synthetic, deterministic ledger entries across exact, partial, mismatched, and missing scenarios.
 - **End-to-End Event Integration:** Automated handler responding to `TRANSACTION_RECONCILIATION_REQUESTED` and emitting `TRANSACTION_RECONCILED` with correlation and causation tracking.
+
+### Day 5 — Fuzzy Ledger Reconciliation & Candidate Matching
+- **Fuzzy Candidate Discovery Layer:** Deterministic `FuzzyCandidateMatcher` ranking potential ledger entries without making authoritative financial decisions.
+- **Field Normalization:** Canonical normalization (`normalize_reference`, `normalize_transaction_id`, `normalize_account_id`, `normalize_currency`) preserving sensitive account digits.
+- **Hard Constraints Enforcement:** Incompatible accounts or currencies immediately trigger candidate rejection, preventing false matches.
+- **Ambiguity Detection & Manual Review:** Competing candidates within `ambiguity_margin` (0.03) are classified as `AMBIGUOUS` with `requires_manual_review = True`.
+- **Two-Stage Reconciliation Pipeline:** Stage 1 (Candidate Discovery) -> Stage 2 (Deterministic Verification Engine).
+- **New Events & Endpoints:** `FUZZY_CANDIDATE_IDENTIFIED` event, `POST /reconciliation/candidates`, and `GET /reconciliation/candidates/{transaction_id}`.
+- **Automated Test Suite:** 145/145 passing tests (18 Day 1 + 20 Day 2 + 25 Day 3 + 35 Day 4 + 47 Day 5).
+- **10,000-Record Benchmark:** 10,000 transactions processed in 3.25 seconds (~3,073 records/second).
 - **REST Endpoints Added:**
   - `POST /reconciliation/run`: Manually trigger reconciliation for a transaction.
   - `GET /reconciliation/{reconciliation_id}`: Retrieve full reconciliation result and explainable evidence.
@@ -433,6 +443,107 @@ python scripts/benchmark_day4.py
 
 ---
 
+## Day 5 — Fuzzy Ledger Reconciliation
+
+Day 5 introduces a deterministic fuzzy candidate-matching layer that identifies candidate general ledger entries even when payment rail metadata contains formatting variations, minor fee discrepancies, or timestamp posting latency.
+
+```text
+                 Transaction
+                      |
+                      v
+              Candidate Discovery
+                      |
+                      v
+               Hard Constraints (Account & Currency)
+                      |
+                      v
+              Fuzzy Candidate Ranker
+                      |
+          +-----------+-----------+
+          |                       |
+          v                       v
+      Clear Winner            Ambiguous (delta < margin)
+          |                       |
+          v                       v
+ Deterministic Engine      Manual Review Required
+          |
+          v
+ Reconciliation Result
+```
+
+> **CRITICAL FINANCIAL SAFETY PRINCIPLE:**  
+> **Fuzzy matching is used only for candidate discovery. Final financial reconciliation remains deterministic and explainable.**  
+> The fuzzy candidate ranker never alters ledger values, never overrides double-entry principles, and never directly marks a transaction as `MATCHED`. Only the deterministic reconciliation engine produces authoritative financial decisions.
+
+### Architectural Pillars
+
+1. **Why Exact Matching is Insufficient:**
+   - In production banking, reference codes are often entered across multiple rails with formatting drift (`PAY-ABC-123` vs `pay abc 123` or `PAY_ABC.123`).
+   - Minor processing fees or cent differences (e.g. $0.01 tolerance) and network posting latencies (settlement within a 15-minute window) prevent naive exact queries from locating candidate ledger entries.
+
+2. **Field Normalization (`reconciliation/normalization.py`):**
+   - **Reference Normalization:** Strips leading/trailing whitespace, converts to uppercase, and collapses separators (`[\s\-_.]+`).
+   - **Transaction ID Normalization:** Strips whitespace and normalizes case while preserving domain structure.
+   - **Account ID Normalization:** Strips outer whitespace and case-folds standard prefixes, but **strictly preserves all meaningful digits**. No digits are ever truncated from sensitive financial account numbers.
+   - **Currency Normalization:** Normalizes to standard 3-letter ISO 4217 uppercase.
+
+3. **Configurable Candidate Scoring (`reconciliation/fuzzy_matcher.py`):**
+   - Evaluates field-level similarity using normalized `difflib.SequenceMatcher`, strict `Decimal` numerical differences, and linear timestamp decay:
+     - **Reference Similarity:** 30%
+     - **Account Match:** 25%
+     - **Decimal Amount Similarity:** 25%
+     - **Timestamp Proximity (900s window):** 15%
+     - **Currency Match:** 5%
+   - Normalized candidate score is bounded within `[0.0, 1.0]`.
+   - Confidence levels:
+     - `HIGH`: Score >= 0.90
+     - `MEDIUM`: Score >= 0.75
+     - `LOW`: Score >= 0.50
+     - `REJECTED`: Score < 0.50 or hard constraint violation.
+
+4. **Non-Negotiable Hard Constraints:**
+   - Account identifier mismatch or currency mismatch immediately triggers candidate `REJECTED` (score: `0.0`).
+   - Prevents dangerous false matches where an unrelated account with an identical reference string or amount would otherwise be selected.
+
+5. **Ambiguity Detection & Manual Review Flag:**
+   - If the difference between the top-ranked candidate and the runner-up candidate is within the configurable `ambiguity_margin` (default: `0.03`), candidate selection is flagged as `AMBIGUOUS`.
+   - The transaction is held for human compliance triage: `requires_manual_review = True`.
+   - Ambiguous candidates are never automatically reconciled or approved.
+
+6. **Two-Stage Reconciliation Architecture:**
+   - **Stage 1 (Discovery):** Queries repository pools, evaluates field similarity, enforces hard constraints, and ranks top candidates.
+   - **Stage 2 (Verification):** Passes the selected top candidate to the existing deterministic `ReconciliationEngine` to compute the authoritative `ReconciliationResult`.
+
+### Day 5 REST API Endpoints
+
+- **`POST /reconciliation/candidates`:** Discover and rank candidate ledger entries for a transaction.
+  ```json
+  // Request
+  { "transaction_id": "TXN-000001" }
+
+  // Response
+  {
+    "transaction_id": "TXN-000001",
+    "candidate_count": 2,
+    "selection_status": "SELECTED",
+    "top_candidate": {
+      "ledger_entry_id": "LEDGER-000001",
+      "candidate_score": 0.96,
+      "confidence_level": "HIGH"
+    },
+    "candidates": [...],
+    "requires_manual_review": false
+  }
+  ```
+- **`GET /reconciliation/candidates/{transaction_id}`:** Retrieve full candidate ranking, field similarity scores, and explainable evidence.
+
+### Running the 10,000-Record Fuzzy Benchmark
+```powershell
+python scripts/benchmark_day5.py
+```
+
+---
+
 ## Directory Structure
 
 ```
@@ -464,8 +575,12 @@ ZT-LedgerGuard/
 │   ├── reconciliation_result.py    # ReconciliationResult model & ReconciliationStatus enum
 │   ├── rules.py                    # 7 deterministic rules, weights & Decimal arithmetic
 │   ├── engine.py                   # Stateless ReconciliationEngine & scoring
-│   ├── ledger_repository.py        # LedgerRepository SQLite persistence abstraction
-│   ├── reconciliation_service.py   # ReconciliationService orchestration & event dispatcher
+│   ├── normalization.py            # Reference, account, and currency safe normalization
+│   ├── fuzzy_result.py             # FuzzyCandidate model, ConfidenceLevel & SelectionStatus
+│   ├── fuzzy_matcher.py            # FuzzyCandidateMatcher with weights & ambiguity detection
+│   ├── candidate_service.py        # CandidateService discovery & ranking coordinator
+│   ├── ledger_repository.py        # LedgerRepository SQLite persistence & candidate queries
+│   ├── reconciliation_service.py   # Two-Stage ReconciliationService & event dispatcher
 │   └── transaction_service.py      # TransactionService ingestion coordinator
 │
 ├── fraud_detection/
@@ -482,25 +597,27 @@ ZT-LedgerGuard/
 │
 ├── database/
 │   ├── __init__.py
-│   └── database.py                 # SQLite persistence, tables & queries
+│   └── database.py                 # SQLite persistence, candidate queries & auto-migrations
 │
 ├── data/
 │   ├── __init__.py
 │   ├── transaction_generator.py    # Deterministic synthetic transaction generator
-│   └── ledger_generator.py         # Synthetic core ledger generator (controlled scenarios)
+│   └── ledger_generator.py         # Synthetic core ledger generator & Day 5 scenarios
 │
 ├── tests/
 │   ├── __init__.py
 │   ├── test_foundation.py          # Day 1 test suite (18 tests)
 │   ├── test_day2.py                # Day 2 test suite (20 tests)
 │   ├── test_day3.py                # Day 3 test suite (25 tests)
-│   └── test_day4.py                # Day 4 test suite (35 tests)
+│   ├── test_day4.py                # Day 4 test suite (35 tests)
+│   └── test_day5.py                # Day 5 test suite (47 tests)
 │
 ├── scripts/
 │   ├── __init__.py
 │   ├── run_transaction_stream.py   # Day 2 streaming CLI
 │   ├── benchmark_day3.py           # Day 3 100-transaction benchmark
-│   └── benchmark_day4.py           # Day 4 1,000-record reconciliation benchmark
+│   ├── benchmark_day4.py           # Day 4 1,000-record reconciliation benchmark
+│   └── benchmark_day5.py           # Day 5 10,000-record fuzzy candidate benchmark
 │
 ├── docs/
 │   ├── architecture.md

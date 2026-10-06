@@ -19,7 +19,9 @@ from database.database import get_transaction
 from orchestrator.event_orchestrator import Event, EventOrchestrator
 from orchestrator.event_types import EventType
 from orchestrator.workflow_state import StageStatus, WorkflowTracker
+from reconciliation.candidate_service import CandidateService
 from reconciliation.engine import ReconciliationEngine
+from reconciliation.fuzzy_result import CandidateDiscoveryResult, CandidateSelectionStatus
 from reconciliation.ledger_repository import LedgerRepository
 from reconciliation.models import LedgerEntry, Transaction
 from reconciliation.reconciliation_result import ReconciliationResult, ReconciliationStatus
@@ -32,20 +34,22 @@ logger = logging.getLogger("reconciliation.reconciliation_service")
 
 
 class ReconciliationService:
-    """Service coordinating deterministic reconciliation across repository, engine, and events."""
+    """Service coordinating two-stage reconciliation: fuzzy candidate discovery + deterministic verification."""
 
     def __init__(
         self,
         repository: Optional[LedgerRepository] = None,
         engine: Optional[ReconciliationEngine] = None,
+        candidate_service: Optional[CandidateService] = None,
         publisher: Optional[EventPublisher] = None,
         workflow_tracker: Optional[WorkflowTracker] = None,
         db_path: Optional[str] = None,
     ) -> None:
-        """Initialize ReconciliationService with its collaborator components."""
+        """Initialize ReconciliationService with repository, engine, and candidate service."""
         self.db_path = db_path
         self.repository = repository or LedgerRepository(db_path=db_path)
         self.engine = engine or ReconciliationEngine()
+        self.candidate_service = candidate_service or CandidateService(repository=self.repository)
         if publisher is None:
             from kafka.local_event_publisher import LocalEventPublisher
             self.publisher = LocalEventPublisher()
@@ -53,13 +57,26 @@ class ReconciliationService:
             self.publisher = publisher
         self.workflow_tracker = workflow_tracker
 
+    def discover_candidates(self, transaction: Transaction) -> CandidateDiscoveryResult:
+        """Discover and rank candidate ledger entries for a transaction without deciding reconciliation."""
+        return self.candidate_service.discover_candidates(transaction)
+
+    def discover_candidates_by_transaction_id(
+        self, transaction_id: str
+    ) -> Optional[CandidateDiscoveryResult]:
+        """Fetch transaction by ID from DB and execute candidate discovery."""
+        tx = self._fetch_transaction_by_id(transaction_id)
+        if not tx:
+            return None
+        return self.discover_candidates(tx)
+
     def reconcile_transaction(
         self,
         transaction: Transaction,
         correlation_id: Optional[str] = None,
         causation_id: Optional[str] = None,
     ) -> ReconciliationResult:
-        """Reconcile a domain Transaction against repository ledger entries and emit result event.
+        """Execute two-stage reconciliation: candidate discovery followed by deterministic verification.
 
         Args:
             transaction: Transaction instance to reconcile.
@@ -67,7 +84,7 @@ class ReconciliationService:
             causation_id: Parent triggering event ID.
 
         Returns:
-            ReconciliationResult containing deterministic match details.
+            ReconciliationResult containing final financial disposition.
         """
         corr_id = correlation_id or f"CORR-{transaction.transaction_id}"
 
@@ -79,23 +96,79 @@ class ReconciliationService:
                 status=StageStatus.PROCESSING.value,
             )
 
-        # 2. Locate Candidate Ledger Entry
-        # First try exact transaction_id match, fallback to reference_id
-        candidate = self.repository.find_by_transaction_id(transaction.transaction_id)
-        if candidate is None and transaction.reference_id:
-            candidate = self.repository.find_by_reference_id(transaction.reference_id)
+        # ----------------------------------------------------------------------
+        # STAGE 1: Candidate Discovery & Fuzzy Ranking
+        # ----------------------------------------------------------------------
+        discovery = self.candidate_service.discover_candidates(transaction)
 
-        # 3. Execute Deterministic Reconciliation Engine
-        result = self.engine.reconcile(
-            transaction=transaction,
-            ledger_entry=candidate,
+        # Emit FUZZY_CANDIDATE_IDENTIFIED Event
+        top_cand = discovery.top_candidate
+        masked_acc = mask_account_id(transaction.account_id)
+        fuzzy_event = Event(
+            event_type=EventType.FUZZY_CANDIDATE_IDENTIFIED.value,
+            source="candidate_service",
             correlation_id=corr_id,
+            causation_id=causation_id,
+            payload={
+                "transaction_id": transaction.transaction_id,
+                "masked_account_id": masked_acc,
+                "candidate_count": discovery.candidate_count,
+                "top_candidate_id": top_cand.ledger_entry_id if top_cand else None,
+                "candidate_score": top_cand.candidate_score if top_cand else 0.0,
+                "confidence_level": top_cand.confidence_level if top_cand else "REJECTED",
+                "ambiguity_status": discovery.selection_status,
+                "requires_manual_review": discovery.requires_manual_review,
+            },
         )
+        self.publisher.publish(fuzzy_event)
+
+        # ----------------------------------------------------------------------
+        # STAGE 2: Deterministic Financial Verification
+        # ----------------------------------------------------------------------
+        if discovery.selection_status == CandidateSelectionStatus.AMBIGUOUS.value:
+            # Ambiguity detected: do NOT approve automatically
+            result = ReconciliationResult(
+                transaction_id=transaction.transaction_id,
+                ledger_entry_id=top_cand.ledger_entry_id if top_cand else None,
+                correlation_id=corr_id,
+                status=ReconciliationStatus.AMBIGUOUS.value,
+                score=top_cand.candidate_score if top_cand else 0.0,
+                matched_fields=top_cand.matched_fields if top_cand else [],
+                mismatched_fields=top_cand.mismatched_fields if top_cand else ["candidate_ambiguity"],
+                mismatch_reasons=discovery.reasons,
+                evidence=top_cand.evidence if top_cand else [],
+                requires_manual_review=True,
+            )
+        else:
+            # Clear candidate identified or candidate rejected/missing
+            candidate_entry: Optional[LedgerEntry] = None
+            if top_cand:
+                candidate_entry = self.repository.get_ledger_entry(top_cand.ledger_entry_id)
+
+            if candidate_entry is None:
+                # Direct repository lookup fallback
+                candidate_entry = self.repository.find_by_transaction_id(transaction.transaction_id)
+                if candidate_entry is None and transaction.reference_id:
+                    candidate_entry = self.repository.find_by_reference_id(transaction.reference_id)
+
+            # Authoritative deterministic verification
+            result = self.engine.reconcile(
+                transaction=transaction,
+                ledger_entry=candidate_entry,
+                correlation_id=corr_id,
+            )
+
+            # Attach manual review requirement if candidate confidence was low or verification failed
+            if discovery.requires_manual_review or result.status in (
+                ReconciliationStatus.MISMATCHED.value,
+                ReconciliationStatus.AMBIGUOUS.value,
+            ):
+                result.requires_manual_review = True
 
         # 4. Persist Reconciliation Result Audit Record
         self.repository.save_reconciliation_result(result)
 
-        # 5. Update Workflow State to COMPLETED or FAILED
+        # 5. Update Workflow State
         if self.workflow_tracker:
             status_val = (
                 StageStatus.FAILED.value
@@ -109,11 +182,11 @@ class ReconciliationService:
                 metadata={
                     "reconciliation_status": result.status,
                     "reconciliation_score": result.score,
+                    "requires_manual_review": result.requires_manual_review,
                 },
             )
 
         # 6. Emit TRANSACTION_RECONCILED Event
-        masked_acc = mask_account_id(transaction.account_id)
         reconciled_event = Event(
             event_type=EventType.TRANSACTION_RECONCILED.value,
             source="reconciliation_service",
@@ -129,39 +202,35 @@ class ReconciliationService:
                 "correlation_id": corr_id,
                 "matched_fields": result.matched_fields,
                 "mismatched_fields": result.mismatched_fields,
+                "requires_manual_review": result.requires_manual_review,
             },
         )
         self.publisher.publish(reconciled_event)
 
         logger.info(
-            "Reconciliation completed for %s: status=%s score=%.2f (event=%s)",
+            "Reconciliation completed for %s: status=%s score=%.2f manual_review=%s (event=%s)",
             transaction.transaction_id,
             result.status,
             result.score,
+            result.requires_manual_review,
             reconciled_event.event_id,
         )
 
         return result
 
-    def reconcile_by_transaction_id(
-        self,
-        transaction_id: str,
-        correlation_id: Optional[str] = None,
-        causation_id: Optional[str] = None,
-    ) -> Optional[ReconciliationResult]:
-        """Fetch transaction from DB and run reconciliation. Returns None if transaction not found."""
+    def _fetch_transaction_by_id(self, transaction_id: str) -> Optional[Transaction]:
+        """Fetch and reconstruct domain Transaction model from SQLite."""
         tx_row = get_transaction(transaction_id, db_path=self.db_path)
         if not tx_row:
             return None
 
-        # Reconstruct Transaction model
         ts = tx_row["transaction_timestamp"]
         if isinstance(ts, str):
             dt = datetime.fromisoformat(ts)
         else:
             dt = ts
 
-        tx = Transaction(
+        return Transaction(
             transaction_id=tx_row["transaction_id"],
             account_id=tx_row["account_id"],
             transaction_type=tx_row["transaction_type"],
@@ -172,6 +241,17 @@ class ReconciliationService:
             destination_system=tx_row["destination_system"],
             reference_id=tx_row.get("reference_id"),
         )
+
+    def reconcile_by_transaction_id(
+        self,
+        transaction_id: str,
+        correlation_id: Optional[str] = None,
+        causation_id: Optional[str] = None,
+    ) -> Optional[ReconciliationResult]:
+        """Fetch transaction from DB and run reconciliation. Returns None if transaction not found."""
+        tx = self._fetch_transaction_by_id(transaction_id)
+        if not tx:
+            return None
 
         return self.reconcile_transaction(
             transaction=tx,

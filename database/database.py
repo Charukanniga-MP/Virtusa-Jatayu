@@ -96,10 +96,17 @@ def init_db(db_path: Optional[str] = None) -> None:
                 mismatched_fields TEXT NOT NULL,
                 mismatch_reasons TEXT NOT NULL,
                 evidence TEXT,
+                requires_manual_review INTEGER DEFAULT 0,
                 timestamp TEXT NOT NULL
             );
             """
         )
+
+        # Dynamic schema migration: add requires_manual_review if missing
+        try:
+            cursor.execute("ALTER TABLE reconciliation_results ADD COLUMN requires_manual_review INTEGER DEFAULT 0;")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
         # Performance indexes for reconciliation & auditing
         cursor.execute(
@@ -118,6 +125,18 @@ def init_db(db_path: Optional[str] = None) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_ledger_reference_id
             ON ledger_entries(reference_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ledger_account_id
+            ON ledger_entries(account_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ledger_amount
+            ON ledger_entries(amount);
             """
         )
         cursor.execute(
@@ -253,14 +272,108 @@ def get_ledger_entries_by_reference_id(conn: sqlite3.Connection, reference_id: s
     return [dict(row) for row in rows]
 
 
+def get_ledger_entries_by_account_id(
+    conn: sqlite3.Connection,
+    account_id: str,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Retrieve ledger entries matching an account ID."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM ledger_entries WHERE account_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (account_id, limit),
+    )
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_ledger_entries_by_amount_range(
+    conn: sqlite3.Connection,
+    min_amount: float,
+    max_amount: float,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Retrieve ledger entries within a numerical amount window."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM ledger_entries WHERE amount BETWEEN ? AND ? ORDER BY timestamp DESC LIMIT ?",
+        (min_amount, max_amount, limit),
+    )
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_ledger_entries_by_timestamp_range(
+    conn: sqlite3.Connection,
+    start_ts: str,
+    end_ts: str,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Retrieve ledger entries posted within a UTC timestamp window."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM ledger_entries WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp DESC LIMIT ?",
+        (start_ts, end_ts, limit),
+    )
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_potential_candidate_ledger_entries(
+    conn: sqlite3.Connection,
+    transaction_id: str,
+    reference_id: Optional[str] = None,
+    account_id: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Retrieve union of potential candidate ledger entries across ID, reference, account, and amount."""
+    cursor = conn.cursor()
+    candidates: Dict[str, Dict[str, Any]] = {}
+
+    # 1. Exact transaction_id
+    cursor.execute("SELECT * FROM ledger_entries WHERE transaction_id = ?", (transaction_id,))
+    for row in cursor.fetchall():
+        candidates[row["ledger_entry_id"]] = dict(row)
+
+    # 2. Reference match if available
+    if reference_id and len(candidates) < limit:
+        cursor.execute("SELECT * FROM ledger_entries WHERE reference_id = ?", (reference_id,))
+        for row in cursor.fetchall():
+            candidates[row["ledger_entry_id"]] = dict(row)
+
+    # 3. Account ID match
+    if account_id and len(candidates) < limit:
+        remaining = limit - len(candidates)
+        cursor.execute(
+            "SELECT * FROM ledger_entries WHERE account_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (account_id, remaining),
+        )
+        for row in cursor.fetchall():
+            candidates[row["ledger_entry_id"]] = dict(row)
+
+    # 4. Amount window match if specified and limit not reached
+    if min_amount is not None and max_amount is not None and len(candidates) < limit:
+        remaining = limit - len(candidates)
+        cursor.execute(
+            "SELECT * FROM ledger_entries WHERE amount BETWEEN ? AND ? ORDER BY timestamp DESC LIMIT ?",
+            (min_amount, max_amount, remaining),
+        )
+        for row in cursor.fetchall():
+            candidates[row["ledger_entry_id"]] = dict(row)
+
+    return list(candidates.values())[:limit]
+
+
 def insert_reconciliation_result(conn: sqlite3.Connection, result_data: Dict[str, Any]) -> None:
     """Insert or replace a reconciliation result record."""
     query = """
         INSERT OR REPLACE INTO reconciliation_results (
             reconciliation_id, transaction_id, ledger_entry_id, correlation_id,
             status, score, matched_fields, mismatched_fields, mismatch_reasons,
-            evidence, timestamp
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            evidence, requires_manual_review, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     params = (
         result_data["reconciliation_id"],
@@ -273,6 +386,7 @@ def insert_reconciliation_result(conn: sqlite3.Connection, result_data: Dict[str
         result_data["mismatched_fields"],
         result_data["mismatch_reasons"],
         result_data.get("evidence"),
+        1 if result_data.get("requires_manual_review") else 0,
         result_data["timestamp"],
     )
     with conn:
@@ -293,5 +407,6 @@ def get_all_reconciliation_results(conn: sqlite3.Connection) -> List[Dict[str, A
     cursor.execute("SELECT * FROM reconciliation_results ORDER BY timestamp DESC")
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
+
 
 
