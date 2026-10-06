@@ -19,10 +19,16 @@ This roadmap outlines the iterative engineering milestones for **ZT-LedgerGuard 
 
 ---
 
-### DAY 2: Transaction Generator and Event Streaming Foundation
-- High-throughput synthetic transaction & ledger event generator.
+### DAY 2: Transaction Generator and Event Streaming Foundation *(Completed)*
+- Realistic synthetic transaction generator (`TransactionGenerator`) with deterministic seed support.
 - Multi-currency, multi-channel payment rail simulations (ACH, Fedwire, SWIFT, SEPA, Cards).
-- Event streaming abstractions decoupling local publishers from distributed message brokers.
+- Event streaming abstractions (`EventPublisher` ABC and `LocalEventPublisher`) decoupling business services from Kafka.
+- Canonical `TRANSACTION_RECEIVED` event model with correlation tracking and masked payload logging.
+- `TransactionService` coordinating ingestion, Pydantic schema validation, SQLite persistence, and decoupled publishing.
+- FastAPI REST endpoints: `POST /transactions`, `POST /transactions/simulate`, and `GET /events/metrics`.
+- CLI simulation utility `scripts/run_transaction_stream.py`.
+- Event execution metrics tracking (`events_published`, `events_handled`, `unknown_events`).
+- 100% test coverage with 38 passing tests (18 Day 1 + 20 Day 2).
 
 ---
 

@@ -35,10 +35,9 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 
 ---
 
-## Current Day 1 Status
+## Current Status: Day 1 & Day 2 Completed
 
-The Day 1 milestone establishes the modular foundation and local development baseline:
-
+### Day 1 — Foundation & Architecture
 - **Project Architecture & Layout:** Modular package structure with isolated agent directories, orchestrator, legacy simulator, and database layers.
 - **Core Domain Models:** Robust Pydantic models for `Transaction`, `LedgerEntry`, and `Event` with strict validation (positive amounts, ISO 3-letter currency codes, non-empty fields).
 - **In-Memory Event Orchestrator:** Local event router supporting dynamic handler registration, decoupled publishing, and graceful handling of unknown event types.
@@ -46,24 +45,37 @@ The Day 1 milestone establishes the modular foundation and local development bas
 - **Security & Data Hygiene Foundation:** Zero-trust masking utilities (`mask_account_id`, `mask_sensitive_value`, `sanitize_log_message`) ensuring account identifiers are masked in application logs.
 - **Legacy Banking Simulator:** Deterministic host simulator (`LegacyBankingSystem`) providing baseline approval (`00`) and limit/restriction rejection codes (`51`/`05`).
 - **FastAPI Core Service:** Minimal web service providing `/health` and `/transactions/validate` endpoints with structured logging.
-- **Automated Test Suite:** 100% passing test coverage (18 test scenarios) verifying all Day 1 functional contracts.
+
+### Day 2 — Transaction Streaming Foundation
+- **Synthetic Transaction Generation:** Deterministic, reproducible stream generator (`TransactionGenerator`) with seed support, multi-rail types (`TRANSFER`, `PAYMENT`, `CARD_PAYMENT`, `WITHDRAWAL`, `DEPOSIT`, `INTERNATIONAL_TRANSFER`), and controlled currencies (`USD`, `EUR`, `GBP`, `INR`).
+- **Local Event Streaming:** Decoupled `EventPublisher` abstract base class and `LocalEventPublisher` implementing in-memory event dispatching to `EventOrchestrator`.
+- **Kafka-Ready Architecture:** Designed for seamless drop-in replacement with `KafkaEventPublisher` in Days 3+ without modifying generator, service, or agent business logic.
+  > **Note: Kafka is not yet enabled.** Day 2 uses a local event publisher as the Kafka-compatible foundation without requiring Docker, Zookeeper, or external brokers.
+- **Transaction Ingestion Service:** `TransactionService` coordinating schema validation, idempotent SQLite persistence, canonical `TRANSACTION_RECEIVED` event creation, and publisher emission.
+- **REST Endpoints:**
+  - `POST /transactions`: Single transaction ingestion and event publishing.
+  - `POST /transactions/simulate`: Bounded synthetic stream simulation (1 to 1000 transactions).
+  - `GET /events/metrics`: Live event execution counters (`events_published`, `events_handled`, `unknown_events`).
+- **CLI Simulation Utility:** `scripts/run_transaction_stream.py` for terminal-based batch/stream transaction generation with zero-trust masked account outputs.
+- **Automated Test Suite:** 38/38 passing tests (18 Day 1 foundation tests + 20 Day 2 streaming tests).
 
 ---
 
-## Technology Stack (Day 1)
+## Technology Stack
 
-Only minimal, lightweight libraries required for Day 1 local development are used:
+Minimal, lightweight libraries verified on Windows without Docker or external dependencies:
 
 - **Python 3.10+** (Windows-native execution)
 - **FastAPI** (Minimal REST API framework)
 - **Uvicorn** (ASGI server)
 - **Pydantic v2** (Strict schema validation and data modeling)
 - **python-dotenv** (Safe environment variable management)
-- **SQLite3** (Standard library embedded relational database)
+- **SQLite3** (Standard library embedded relational database with parameterized queries)
 - **Pandas** (Tabular data support foundation)
 - **pytest** & **HTTPX** (Automated test runner and API client)
 
-*Docker, Kubernetes, and Apache Kafka are deliberately NOT required for Day 1.*
+*Docker, Kubernetes, and Apache Kafka are deliberately NOT required for Day 1 or Day 2.*
+
 
 ---
 
@@ -129,16 +141,70 @@ curl -X POST http://127.0.0.1:8000/transactions/validate `
   -H "Content-Type: application/json" `
   -d '{\"transaction_id\": \"TX-10001\", \"account_id\": \"123456789012\", \"transaction_type\": \"TRANSFER\", \"amount\": 2500.50, \"currency\": \"USD\", \"transaction_timestamp\": \"2026-10-06T10:30:00Z\", \"source_system\": \"CORE_API\", \"destination_system\": \"ACH_GATEWAY\"}'
 ```
+**Ingest and Stream Transaction (Day 2):**
+```powershell
+curl -X POST http://127.0.0.1:8000/transactions `
+  -H "Content-Type: application/json" `
+  -d '{\"transaction_id\": \"TXN-000101\", \"account_id\": \"ACC-100012\", \"transaction_type\": \"PAYMENT\", \"amount\": 150.00, \"currency\": \"USD\", \"transaction_timestamp\": \"2026-10-06T12:00:00Z\", \"source_system\": \"MOBILE_APP\", \"destination_system\": \"ACH_NETWORK\"}'
+```
 Response:
 ```json
 {
-  "status": "valid",
-  "transaction_id": "TX-10001",
-  "message": "Transaction passed schema and validation checks."
+  "status": "accepted",
+  "transaction_id": "TXN-000101",
+  "event_type": "TRANSACTION_RECEIVED"
 }
 ```
 
+**Simulate Synthetic Stream (Day 2):**
+```powershell
+curl -X POST http://127.0.0.1:8000/transactions/simulate `
+  -H "Content-Type: application/json" `
+  -d '{\"count\": 10, \"seed\": 42}'
+```
+Response:
+```json
+{
+  "status": "completed",
+  "generated": 10,
+  "accepted": 10,
+  "rejected": 0
+}
+```
+
+**Query Live Event Metrics (Day 2):**
+```powershell
+curl http://127.0.0.1:8000/events/metrics
+```
+Response:
+```json
+{
+  "events_published": 10,
+  "events_handled": 10,
+  "events_rejected": 0,
+  "unknown_events": 0,
+  "processing_errors": 0
+}
+```
+
+### 8. Run CLI Transaction Stream Simulation
+```powershell
+python scripts/run_transaction_stream.py --count 20 --seed 42
+```
+Output:
+```text
+ZT-LedgerGuard Transaction Stream
+---------------------------------
+Generated: 20
+Accepted: 20
+Rejected: 0
+Events Published: 20
+Events Handled: 20
+---------------------------------
+```
+
 ---
+
 
 ## Directory Structure
 

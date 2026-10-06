@@ -97,9 +97,9 @@ def init_db(db_path: Optional[str] = None) -> None:
 
 
 def insert_transaction(conn: sqlite3.Connection, transaction: Transaction) -> None:
-    """Insert a validated transaction record using safe parameterized query."""
+    """Insert or replace a validated transaction record using safe parameterized query."""
     query = """
-        INSERT INTO transactions (
+        INSERT OR REPLACE INTO transactions (
             transaction_id, account_id, transaction_type, amount, currency,
             transaction_timestamp, source_system, destination_system,
             reference_id, created_at
@@ -130,13 +130,14 @@ def get_transaction_by_id(conn: sqlite3.Connection, transaction_id: str) -> Opti
 
 
 def insert_ledger_entry(conn: sqlite3.Connection, entry: LedgerEntry) -> None:
-    """Insert a validated ledger entry record using safe parameterized query."""
+    """Insert or replace a validated ledger entry record using safe parameterized query."""
     query = """
-        INSERT INTO ledger_entries (
+        INSERT OR REPLACE INTO ledger_entries (
             ledger_entry_id, transaction_id, account_id, amount, currency,
             debit_credit, reference_id, timestamp, source_system
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
+
     params = (
         entry.ledger_entry_id,
         entry.transaction_id,
@@ -158,3 +159,42 @@ def get_ledger_entries_by_transaction_id(conn: sqlite3.Connection, transaction_i
     cursor.execute("SELECT * FROM ledger_entries WHERE transaction_id = ?", (transaction_id,))
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+def save_transaction(transaction: Transaction, db_path: Optional[str] = None) -> None:
+    """Save a transaction directly managing connection lifecycle.
+
+    Convenience wrapper around insert_transaction.
+    """
+    with get_connection(db_path) as conn:
+        insert_transaction(conn, transaction)
+
+
+
+def get_transaction(transaction_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Retrieve a transaction by ID directly managing connection lifecycle.
+
+    Convenience wrapper around get_transaction_by_id.
+    """
+    with get_connection(db_path) as conn:
+        return get_transaction_by_id(conn, transaction_id)
+
+
+def get_max_transaction_counter(db_path: Optional[str] = None) -> int:
+    """Find the highest integer sequence number among existing TXN-xxxxxx records."""
+    try:
+        with get_connection(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT transaction_id FROM transactions WHERE transaction_id LIKE 'TXN-%'")
+            rows = cursor.fetchall()
+            max_val = 0
+            for row in rows:
+                tx_id = row["transaction_id"]
+                parts = tx_id.split("-")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    max_val = max(max_val, int(parts[1]))
+            return max_val
+    except Exception:
+        return 0
+
+

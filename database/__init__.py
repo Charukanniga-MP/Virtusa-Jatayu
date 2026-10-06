@@ -7,6 +7,8 @@ from database.database import (
     get_transaction_by_id,
     insert_ledger_entry,
     get_ledger_entries_by_transaction_id,
+    save_transaction,
+    get_transaction,
 )
 
 __all__ = [
@@ -16,4 +18,7 @@ __all__ = [
     "get_transaction_by_id",
     "insert_ledger_entry",
     "get_ledger_entries_by_transaction_id",
+    "save_transaction",
+    "get_transaction",
 ]
+
