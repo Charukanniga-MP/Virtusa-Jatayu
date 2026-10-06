@@ -40,11 +40,13 @@ class ProcessingPipeline:
         workflow_tracker: Optional[WorkflowTracker] = None,
         reconciliation_service: Optional[Any] = None,
         fraud_service: Optional[Any] = None,
+        agent_coordinator: Optional[Any] = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.tracker = workflow_tracker or WorkflowTracker()
         self.reconciliation_service = reconciliation_service
         self.fraud_service = fraud_service
+        self.agent_coordinator = agent_coordinator
         self._register_pipeline_handlers()
 
     def _register_pipeline_handlers(self) -> None:
@@ -163,6 +165,25 @@ class ProcessingPipeline:
             logger.info("[Pipeline] Workflow %s marked COMPLETED (APPROVED)", event.correlation_id)
             return {"stage": "FINAL_DECISION", "status": "COMPLETED"}
 
+        # 8. CONSENSUS_DECISION_REQUESTED -> Consensus In Progress
+        def on_consensus_requested(event: Event) -> Dict[str, Any]:
+            self.tracker.update_stage(event.correlation_id, "consensus_decision", StageStatus.CONSENSUS_IN_PROGRESS.value)
+            logger.info("[Pipeline] Consensus decision requested for %s", event.correlation_id)
+            return {"stage": "CONSENSUS_DECISION", "status": "IN_PROGRESS"}
+
+        # 9. CONSENSUS_DECISION_COMPLETED -> Workflow completion
+        def on_consensus_completed(event: Event) -> Dict[str, Any]:
+            decision = event.payload.get("decision", "MANUAL_REVIEW")
+            self.tracker.update_stage(
+                event.correlation_id,
+                "consensus_decision",
+                StageStatus.CONSENSUS_DECISION_COMPLETED.value,
+                metadata={"decision": decision},
+            )
+            self.tracker.mark_completed(event.correlation_id, final_disposition=decision)
+            logger.info("[Pipeline] Workflow %s marked COMPLETED (%s)", event.correlation_id, decision)
+            return {"stage": "CONSENSUS_DECISION", "status": "COMPLETED", "decision": decision}
+
         # Register to the orchestrator instance
         self.orchestrator.register_handler(
             EventType.TRANSACTION_RECEIVED.value, on_transaction_received
@@ -184,6 +205,12 @@ class ProcessingPipeline:
         )
         self.orchestrator.register_handler(
             EventType.RISK_ANALYSIS_COMPLETED.value, on_risk_completed
+        )
+        self.orchestrator.register_handler(
+            EventType.CONSENSUS_DECISION_REQUESTED.value, on_consensus_requested
+        )
+        self.orchestrator.register_handler(
+            EventType.CONSENSUS_DECISION_COMPLETED.value, on_consensus_completed
         )
 
     def execute_transaction_workflow(

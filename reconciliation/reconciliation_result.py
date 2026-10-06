@@ -76,6 +76,17 @@ class ReconciliationResult(BaseModel):
         description="Timestamp when the reconciliation was performed",
     )
 
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def parse_evidence_json(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            import json
+            try:
+                return json.loads(value)
+            except Exception:
+                return []
+        return value
+
     @field_validator("status")
     @classmethod
     def validate_status(cls, value: str) -> str:

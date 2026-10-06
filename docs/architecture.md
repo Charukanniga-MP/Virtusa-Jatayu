@@ -324,51 +324,158 @@ Final Decision
 
 ---
 
-## 7. Component Status Matrix (Days 1–6 vs. Planned)
+## 7. Day 7 Multi-Agent Coordination & Risk Decision Consensus
 
-| Component | Status | Day 1–6 Implementation Scope | Planned Full Scope (Days 7–15) |
+Day 7 establishes an explainable, deterministic multi-agent orchestration architecture uniting 4 specialized domain agents under a centralized Consensus Engine.
+
+```text
+                    Incoming Transaction
+                             │
+                             ▼
+                    [AgentCoordinator]
+       ┌─────────────────────┼─────────────────────┐
+       ▼                     ▼                     ▼
+[ReconciliationAgent] [FraudDetectionAgent]   [PolicyAgent]
+ (Candidate Discovery   (7 Features, 7 Rules,  (Compliance, Limits,
+ & Deterministic Verif) Baseline Deviations)    Compound Risks)
+       │                     │                     │
+       └─────────────────────┬─────────────────────┘
+                             ▼
+                      DecisionContext
+                             │
+                             ▼
+                    [ConsensusEngine]
+              (Precedence: BLOCK > REVIEW > APPROVE)
+                             │
+                             ▼
+                      DecisionResult
+        (Authoritative Disposition, Confidence 0.0-1.0,
+         Disagreements, Triggered Policies, SQLite & Audit)
+```
+
+### Specialized Domain Agents
+
+1. **`ReconciliationAgent` (`agents/reconciliation_agent/reconciliation_agent.py`):**
+   - Implements `BaseAgent` contract (`analyze()`, `create_execution_record()`).
+   - Wraps Day 5 two-stage reconciliation (`CandidateService` discovery + `ReconciliationEngine` verification).
+   - Produces structured `ReconciliationAgentResult` with status (`MATCHED`, `AMBIGUOUS`, `MISMATCHED`, `NOT_FOUND`), score, and manual review flag.
+
+2. **`FraudDetectionAgent` (`agents/fraud_agent/fraud_agent.py`):**
+   - Implements `BaseAgent` contract.
+   - Evaluates 7 canonical features against 7 independent deterministic rules with profile baselining.
+   - Categorizes risk into `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` with explainable evidence.
+
+3. **`PolicyAgent` (`agents/policy_agent/policy_agent.py`):**
+   - Evaluates governance, regulatory compliance, and composite risk patterns.
+   - Policies evaluated:
+     - `CRITICAL_FRAUD_RISK`: Mandates `BLOCK_RECOMMENDED` if fraud score $\ge 75$.
+     - `HIGH_FRAUD_RISK`: Mandates `MANUAL_REVIEW` if fraud score $\ge 50$.
+     - `RECONCILIATION_AMBIGUITY`: Mandates `MANUAL_REVIEW` if candidates are ambiguous.
+     - `RECONCILIATION_MISMATCH`: Mandates `MANUAL_REVIEW` on ledger discrepancy.
+     - `MISSING_LEDGER_ENTRY`: Mandates `MANUAL_REVIEW` if ledger entry is `NOT_FOUND`.
+     - `COMBINED_HIGH_RISK`: Escalates to `BLOCK_RECOMMENDED` on ledger mismatch + elevated fraud score ($\ge 50$).
+     - `TRANSACTION_LIMIT_BREACH`: Flags amounts exceeding single-transaction ceiling ($1,000,000 INR).
+
+4. **`DecisionAgent` & `ConsensusEngine` (`agents/decision_agent/decision_agent.py`):**
+   - Central arbitrator reconciling individual agent postures into an authoritative final disposition.
+   - Applies strict deterministic precedence and confidence scoring.
+
+### Centralized Consensus Precedence & Rule Hierarchy
+
+```text
+               ┌───────────────────────┐
+               │   BLOCK_RECOMMENDED   │  Highest Precedence (Priority 3)
+               └───────────┬───────────┘
+                           │
+               ┌───────────▼───────────┐
+               │     MANUAL_REVIEW     │  Intermediate Precedence (Priority 2)
+               └───────────┬───────────┘
+                           │
+               ┌───────────▼───────────┐
+               │        APPROVE        │  Lowest Precedence (Priority 1)
+               └───────────────────────┘
+```
+
+| Rule | Trigger Condition | Consensus Disposition | Precedence Priority | Rationale |
+| :--- | :--- | :--- | :---: | :--- |
+| **Rule 1** | Fraud Score $\ge 75$ (`CRITICAL`) | `BLOCK_RECOMMENDED` | **Highest (3)** | Severe fraud risk overrides clean reconciliation match. |
+| **Rule 5** | Ledger Mismatch + Fraud Score $\ge 50$ | `BLOCK_RECOMMENDED` | **Highest (3)** | Compound risk: unverified ledger + elevated fraud threat. |
+| **Policy Mandate** | Policy recommendation `BLOCK_RECOMMENDED` | `BLOCK_RECOMMENDED` | **Highest (3)** | Governance policy breach mandates immediate freeze. |
+| **Rule 2** | Elevated Fraud ($50 \le \text{score} < 75$) | `MANUAL_REVIEW` | **Medium (2)** | Suspicious anomaly requires compliance triage. |
+| **Rule 3** | Reconciliation Status `AMBIGUOUS` | `MANUAL_REVIEW` | **Medium (2)** | Fuzzy candidate ambiguity cannot be auto-approved. |
+| **Rule 4** | Reconciliation Status `NOT_FOUND` | `MANUAL_REVIEW` | **Medium (2)** | Missing ledger entry requires human investigation. |
+| **Mismatch** | Reconciliation Status `MISMATCHED` | `MANUAL_REVIEW` | **Medium (2)** | Discrepancy requires accounting operator reconciliation. |
+| **Fail-Safe** | Any Agent Execution Failure | `MANUAL_REVIEW` | **Medium (2)** | Zero-Trust: Agent Failure != Approval. |
+| **Rule 6** | Matched Ledger + Low Fraud ($<25$) + Policy Clean | `APPROVE` | **Lowest (1)** | Full alignment across all agents with zero anomalies. |
+| **Rule 7** | Matched Ledger + Moderate Fraud ($25 \le \text{score} < 50$) | `APPROVE` | **Lowest (1)** | Verified ledger match approves with preserved audit evidence. |
+
+### Deterministic Agreement Confidence Formula
+
+The consensus confidence score is deterministically calculated and strictly bounded within `[0.50, 1.0]`:
+- **Base Agreement Score:** `1.00`
+- **Agent Failure Penalty:** $-0.35$ (drops base confidence to $\le 0.65$)
+- **Inter-Agent Disagreement Penalty:** $-0.20$ (drops base confidence to $\le 0.80$)
+- **Borderline Reconciliation Score Penalty:** $-0.05$ (if match score $< 0.85$) or $-0.10$ (if `PARTIAL_MATCH`)
+- **Boundary Fraud Score Penalty:** $-0.05$ (if fraud score is on decision edge: $[45, 55]$ or $[70, 78]$)
+- **Bounded Clamping:** $\text{Confidence} = \max(0.50, \min(1.0, \text{Score}))$
+
+### Zero-Trust Safety & Immutability Invariants
+
+1. **Agent Failure != Approval:** If an agent encounters an unhandled exception or RPC timeout, the coordinator records the failure, downgrades confidence, and forces `MANUAL_REVIEW`.
+2. **Strict Financial Immutability:** No agent or coordinator is permitted to mutate transaction amounts, account numbers, currencies, or reconciliation status.
+3. **Audit Trail Integrity:** Account numbers are masked (`mask_account_id`) across all consensus events (`CONSENSUS_DECISION_REQUESTED`, `CONSENSUS_DECISION_COMPLETED`).
+4. **Idempotent Decision Cache:** Duplicate analysis requests for the same transaction return cached results idempotently.
+
+---
+
+## 8. Component Status Matrix (Days 1–7 vs. Planned)
+
+| Component | Status | Day 1–7 Implementation Scope | Planned Full Scope (Days 8–15) |
 | :--- | :--- | :--- | :--- |
-| **Transaction Sources** | **IMPLEMENTED (Day 2)** | Deterministic synthetic generator `TransactionGenerator` with multi-channel, multi-currency, and Day 6 fraud scenario simulation. | Continuous streaming load injector with anomaly burst modes. |
-| **Event Ingestion Layer** | **IMPLEMENTED (Day 2)** | `TransactionService` coordinating validation, SQLite persistence, and decoupled event publishing via `POST /transactions` and `POST /transactions/simulate`. | Distributed streaming ingestion gateways with TLS token authentication. |
-| **Event Publisher** | **IMPLEMENTED (Day 2)** | `EventPublisher` ABC with concrete `LocalEventPublisher` routing to `EventOrchestrator`. | `KafkaEventPublisher` implementing the same `EventPublisher` interface with zero code refactoring needed. |
-| **Event Orchestrator** | **IMPLEMENTED (Day 3)** | Decoupled event bus with dynamic handler registry, idempotency deduplication (`_processed_event_ids`), bounded retries (`MAX_EVENT_RETRIES`), sync/async non-blocking handler support, and full audit trail. | Distributed Apache Kafka topics, consumer groups, partition management, DLQs. |
-| **Workflow State Tracker** | **IMPLEMENTED (Day 3, 6)** | Thread-safe `WorkflowTracker` tracking status and stage breakdowns (`validation`, `reconciliation`, `fraud_analysis`, `risk_analysis`, `final_decision`). | Persistent Redis / distributed state cache with timeout monitors. |
-| **Event Audit Trail** | **IMPLEMENTED (Day 3)** | Thread-safe `EventAuditTrail` capturing immutable records with statuses (`RECEIVED`, `PROCESSING`, `COMPLETED`, `FAILED`, `DUPLICATE`) and causation lineage. | Append-only cryptographically signed ledger audit log (Day 8). |
-| **Processing Pipeline** | **IMPLEMENTED (Day 3-6)** | `ProcessingPipeline` chaining canonical banking event stages, dynamically invoking two-stage `ReconciliationService` and `FraudService`. | Full multi-agent consensus evaluation pipeline. |
-| **Reconciliation Engine** | **IMPLEMENTED (Day 4-5)** | Two-stage architecture: `CandidateService` + `FuzzyCandidateMatcher` (Stage 1) and deterministic `ReconciliationEngine` (Stage 2) with 7 banking rules, Decimal arithmetic, explainability, ambiguity detection, and manual review flags. | Multi-account split reconciliation and automated reversal generation (Day 10). |
-| **Fraud Agent** | **IMPLEMENTED (Day 6)** | Autonomous, deterministic `FraudDetectionAgent`, 7 feature extractors, 7 rules, profile baselining, anti-double-counting safeguards, risk scoring (0-100), SQLite persistence, and REST APIs (`POST /fraud/analyze`, `GET /fraud/{id}`, `GET /fraud/metrics`). | Multi-agent risk consensus (Day 7), optional ML embedding scoring. |
-| **Risk Agent** | **PLANNED** | Directory initialized (`agents/risk_agent`). | Multi-agent risk profiling & aggregate score weighting (Day 7). |
-| **Decision Engine** | **PLANNED** | Placeholder disposition handler (`TRANSACTION_APPROVED`). | Multi-agent consensus engine and automated disposition logic (Day 7). |
+| **Transaction Sources** | **IMPLEMENTED (Day 2)** | Synthetic generator `TransactionGenerator` with multi-channel, multi-currency, and fraud scenario generation. | Continuous streaming load injector with anomaly burst modes. |
+| **Event Ingestion Layer** | **IMPLEMENTED (Day 2)** | `TransactionService` coordinating validation, SQLite persistence, and decoupled event publishing via `POST /transactions`. | Distributed streaming ingestion gateways with TLS token authentication. |
+| **Event Publisher** | **IMPLEMENTED (Day 2)** | `EventPublisher` ABC with concrete `LocalEventPublisher` routing to `EventOrchestrator`. | `KafkaEventPublisher` implementing the same `EventPublisher` interface. |
+| **Event Orchestrator** | **IMPLEMENTED (Day 3)** | Decoupled event bus with dynamic handler registry, idempotency deduplication, bounded retries (`MAX_EVENT_RETRIES`), sync/async handler support. | Distributed Apache Kafka topics, consumer groups, partition management, DLQs. |
+| **Workflow State Tracker** | **IMPLEMENTED (Day 3, 6, 7)**| Thread-safe `WorkflowTracker` tracking status and stage breakdowns (`validation`, `reconciliation`, `fraud_analysis`, `consensus_decision`). | Persistent Redis / distributed state cache with timeout monitors. |
+| **Event Audit Trail** | **IMPLEMENTED (Day 3)** | Thread-safe `EventAuditTrail` capturing immutable records with causation lineage. | Append-only cryptographically signed ledger audit log (Day 8). |
+| **Reconciliation Agent** | **IMPLEMENTED (Day 4, 5, 7)** | Standardized `ReconciliationAgent` wrapping two-stage candidate discovery (`CandidateService` + `FuzzyCandidateMatcher`) and deterministic verification (`ReconciliationEngine`). | Multi-account split reconciliation and automated reversal generation (Day 10). |
+| **Fraud Detection Agent**| **IMPLEMENTED (Day 6, 7)** | Autonomous `FraudDetectionAgent` extracting 7 features, evaluating 7 rules, baselining account profiles, and generating `AgentExecutionRecord`. | Optional ML embedding scoring and graph fraud rings (Day 12). |
+| **Policy Agent** | **IMPLEMENTED (Day 7)** | `PolicyAgent` evaluating critical fraud, high fraud, ambiguity, mismatch, missing ledger, compound risk, and transaction limits. | Dynamic regulatory rule reloading and external policy bundles (Day 8). |
+| **Decision Agent & Consensus**| **IMPLEMENTED (Day 7)** | Centralized `DecisionAgent` & `ConsensusEngine` implementing strict precedence (`BLOCK > REVIEW > APPROVE`), confidence scoring, and disagreement detection. | Dynamic committee voting and multi-jurisdiction rule trees (Day 12). |
+| **Agent Coordinator** | **IMPLEMENTED (Day 7)** | `AgentCoordinator` orchestrating all 4 domain agents, idempotency caching, masked audit event emissions, and SQLite `decision_results` persistence. | Distributed distributed actor-model agent coordinator (Day 12). |
 | **Legacy System Simulator** | **IMPLEMENTED (Day 1)** | Deterministic `LegacyBankingSystem` simulating host approvals/rejections. | Full Shadow Deployment dual-run engine and discrepancy analysis (Day 9). |
-| **Investigation Queue** | **IMPLEMENTED (Day 5, 6)**| Flagged via `requires_manual_review = True` on ambiguous reconciliation and HIGH/CRITICAL fraud analyses. | Alert queuing, operator review console, and case management (Day 11). |
-| **Security Layer** | **IMPLEMENTED (Day 1-6)** | Account ID masking (`mask_account_id`), zero-trust log sanitization, safe normalization preserving account digits. | Mutual TLS, cryptographic signing, API gateway policies (Day 8). |
-| **Privacy Layer** | **IMPLEMENTED (Day 1-6)** | Zero-trust logging rule: strict ban on raw PII / account numbers in logs, fuzzy evidence, and fraud event payloads. | Differential privacy queries and cryptographic data tokenization (Day 8). |
-| **Database** | **IMPLEMENTED (Day 1-6)** | Local SQLite engine with indexed tables (`transactions`, `ledger_entries`, `reconciliation_results`, `fraud_analyses`), migration support, and aggregated metrics queries. | PostgreSQL / TimescaleDB support with high-throughput indexing (Day 8+). |
-| **Monitoring & Telemetry** | **IMPLEMENTED (Day 3-6)** | Structured logging + live execution metrics, audit traces, reconciliation metrics, and fraud metrics (`GET /fraud/metrics`). | Distributed OpenTelemetry tracing and Prometheus metric exporters (Day 12). |
+| **Investigation Queue** | **IMPLEMENTED (Day 5-7)** | Flagged via `requires_manual_review = True` on ambiguous reconciliation, high/critical fraud, policy triggers, or agent failures. | Operator review console, and case management (Day 11). |
+| **Security Layer** | **IMPLEMENTED (Day 1-7)** | Zero-trust masking (`mask_account_id`), log sanitization, safe normalization, immutable decision attributes. | Mutual TLS, cryptographic signing, API gateway policies (Day 8). |
+| **Privacy Layer** | **IMPLEMENTED (Day 1-7)** | Strict ban on raw PII / account numbers in logs, fuzzy evidence, and event payloads. | Differential privacy queries and cryptographic data tokenization (Day 8). |
+| **Database** | **IMPLEMENTED (Day 1-7)** | SQLite with indexed tables (`transactions`, `ledger_entries`, `reconciliation_results`, `fraud_analyses`, `decision_results`). | PostgreSQL / TimescaleDB support with high-throughput indexing (Day 8+). |
+| **REST APIs** | **IMPLEMENTED (Day 1-7)** | Validation, Streaming, Events, Reconciliation, Candidates, Fraud, and Decision APIs (`POST /decision/analyze`, `GET /decision/metrics`, `GET /decision/{id}`). | Full OpenAPI 3.1 gateway and gRPC endpoints (Day 14). |
 | **Dashboard** | **PLANNED** | Directory initialized (`dashboard/`). | Real-time operator triage console and reconciliation metrics UI (Day 11). |
 
 ---
 
-## 8. Data Flow & Zero-Trust Boundary
+## 9. Data Flow & Zero-Trust Multi-Agent Boundary
 
-### Implemented Flow:
-1. **Transaction Submission:** A client submits a JSON payload to `POST /transactions` or `POST /transactions/simulate`.
+### Implemented End-to-End Flow:
+1. **Transaction Submission:** A client submits a transaction to `POST /transactions` or `POST /transactions/simulate`.
 2. **Schema & Business Validation:** Pydantic `Transaction` validates fields, positive amounts, 3-letter currency codes, and non-empty IDs.
 3. **Zero-Trust Sanitization:** Account identifiers are masked via `mask_account_id()` prior to output to system logs and event audit records.
 4. **Local Event Dispatch:** The transaction is converted into an in-memory `Event` and routed via `EventOrchestrator` to registered handlers.
-5. **Candidate Discovery (Stage 1):** `CandidateService` retrieves potential candidates from indexed SQLite tables and ranks them via `FuzzyCandidateMatcher`. Emits `FUZZY_CANDIDATE_IDENTIFIED`.
-6. **Financial Verification (Stage 2):** Selected candidate is evaluated by deterministic `ReconciliationEngine`. Emits `TRANSACTION_RECONCILED`.
-7. **Fraud Risk Analysis:** `FraudService` invokes `FraudDetectionAgent` extracting 7 features, evaluating 7 deterministic rules, and emitting `FRAUD_ANALYSIS_COMPLETED`.
-8. **Database Storage:** Tables `transactions`, `ledger_entries`, `reconciliation_results`, and `fraud_analyses` are maintained in SQLite with parameterized queries preventing SQL injection.
+5. **Reconciliation Agent:** Discovers candidate ledger entries via `CandidateService` + `FuzzyCandidateMatcher` and verifies via `ReconciliationEngine`. Emits `RECONCILIATION_AGENT_COMPLETED`.
+6. **Fraud Detection Agent:** Extracts 7 features, compares with account profile baseline, evaluates 7 independent fraud rules. Emits `FRAUD_AGENT_COMPLETED`.
+7. **Policy Agent:** Evaluates compliance rules, single transaction ceilings, and compound risk. Emits `POLICY_AGENT_COMPLETED`.
+8. **Consensus Engine:** Combines agent postures, resolves precedence (`BLOCK > REVIEW > APPROVE`), calculates agreement confidence, flags disagreements. Emits `CONSENSUS_DECISION_COMPLETED`.
+9. **Database Persistence:** Persists authoritative `DecisionResult` in SQLite `decision_results` table with audit trail.
 
 ---
 
-## 9. Architectural Decisions
+## 10. Architectural Decisions
 
 1. **No Docker / Local-First Python:** Entire foundation is executable on standard Windows workstations using native Python virtual environments.
 2. **Decoupled Event Orchestration:** The `EventOrchestrator` defines an interface identical to pub/sub brokers, allowing drop-in Kafka replacement without refactoring downstream agents.
 3. **Two-Stage Reconciliation Separation:** Fuzzy matching is strictly confined to candidate discovery. Authoritative financial reconciliation decisions are reserved for the deterministic engine.
-4. **Deterministic & Explainable Fraud Intelligence:** Zero LLM dependency; risk decisions are 100% reproducible, explainable, and auditable.
-5. **Data Hygiene First:** Logging never prints raw account numbers; zero-trust principles are applied across all stages.
+4. **Deterministic & Explainable Intelligence:** Zero LLM dependency; risk and consensus decisions are 100% reproducible, explainable, and auditable.
+5. **Centralized Precedence Arbitration:** Conflicting agent postures are resolved deterministically using `BLOCK_RECOMMENDED > MANUAL_REVIEW > APPROVE`.
+6. **Fail-Safe Invariant:** `Agent Failure != Approval` ensures unhandled downstream errors fall back to human compliance triage.
+7. **Data Hygiene First:** Logging never prints raw account numbers; zero-trust principles are applied across all stages.
 
 

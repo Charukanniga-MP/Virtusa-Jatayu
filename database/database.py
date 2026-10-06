@@ -188,6 +188,50 @@ def init_db(db_path: Optional[str] = None) -> None:
             ON fraud_analyses(created_at);
             """
         )
+
+        # Multi-agent decision results table (Day 7)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS decision_results (
+                id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL,
+                correlation_id TEXT,
+                decision TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                requires_manual_review INTEGER NOT NULL,
+                block_recommended INTEGER NOT NULL,
+                agent_results_json TEXT,
+                policy_results_json TEXT,
+                decision_reasons_json TEXT,
+                disagreements_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_decision_transaction_id
+            ON decision_results(transaction_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_decision_correlation_id
+            ON decision_results(correlation_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_decision_decision
+            ON decision_results(decision);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_decision_created_at
+            ON decision_results(created_at);
+            """
+        )
         conn.commit()
 
 
@@ -543,4 +587,109 @@ def get_fraud_metrics(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
+# ==============================================================================
+# Multi-Agent Decision Results Persistence & Retrieval (Day 7)
+# ==============================================================================
 
+def insert_decision_result(conn: sqlite3.Connection, decision_data: Dict[str, Any]) -> None:
+    """Insert or replace a multi-agent decision outcome in SQLite."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO decision_results (
+            id,
+            transaction_id,
+            correlation_id,
+            decision,
+            confidence,
+            requires_manual_review,
+            block_recommended,
+            agent_results_json,
+            policy_results_json,
+            decision_reasons_json,
+            disagreements_json,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            decision_data["id"],
+            decision_data["transaction_id"],
+            decision_data.get("correlation_id"),
+            decision_data["decision"],
+            float(decision_data["confidence"]),
+            1 if decision_data["requires_manual_review"] else 0,
+            1 if decision_data["block_recommended"] else 0,
+            json.dumps(decision_data.get("agent_results", {})),
+            json.dumps(decision_data.get("triggered_policies", [])),
+            json.dumps(decision_data.get("decision_reasons", [])),
+            json.dumps(decision_data.get("disagreements", [])),
+            decision_data.get("created_at") or decision_data.get("decision_timestamp"),
+        ),
+    )
+    conn.commit()
+
+
+def get_decision_result_by_transaction_id(
+    conn: sqlite3.Connection, transaction_id: str
+) -> Optional[Dict[str, Any]]:
+    """Retrieve the latest multi-agent decision for a transaction ID."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT * FROM decision_results
+        WHERE transaction_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1;
+        """,
+        (transaction_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("agent_results_json"):
+        d["agent_results"] = json.loads(d["agent_results_json"])
+    if d.get("policy_results_json"):
+        d["triggered_policies"] = json.loads(d["policy_results_json"])
+    if d.get("decision_reasons_json"):
+        d["decision_reasons"] = json.loads(d["decision_reasons_json"])
+    if d.get("disagreements_json"):
+        d["disagreements"] = json.loads(d["disagreements_json"])
+    d["requires_manual_review"] = bool(d["requires_manual_review"])
+    d["block_recommended"] = bool(d["block_recommended"])
+    return d
+
+
+def get_decision_metrics(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Calculate aggregated decision metrics across multi-agent consensus evaluations."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            COUNT(*) as total_decisions,
+            SUM(CASE WHEN decision = 'APPROVE' THEN 1 ELSE 0 END) as approved_count,
+            SUM(CASE WHEN decision = 'MANUAL_REVIEW' THEN 1 ELSE 0 END) as manual_review_count,
+            SUM(CASE WHEN decision = 'BLOCK_RECOMMENDED' THEN 1 ELSE 0 END) as block_recommended_count,
+            AVG(confidence) as avg_confidence,
+            SUM(CASE WHEN disagreements_json IS NOT NULL AND disagreements_json != '[]' THEN 1 ELSE 0 END) as disagreement_count
+        FROM decision_results
+        """
+    )
+    row = cursor.fetchone()
+    if not row or row["total_decisions"] == 0:
+        return {
+            "total_decisions": 0,
+            "approved": 0,
+            "manual_review": 0,
+            "block_recommended": 0,
+            "average_confidence": 0.0,
+            "agent_disagreements": 0,
+        }
+    return {
+        "total_decisions": row["total_decisions"],
+        "approved": row["approved_count"] or 0,
+        "manual_review": row["manual_review_count"] or 0,
+        "block_recommended": row["block_recommended_count"] or 0,
+        "average_confidence": round(float(row["avg_confidence"] or 0.0), 4),
+        "agent_disagreements": row["disagreement_count"] or 0,
+    }

@@ -34,7 +34,18 @@ from orchestrator.event_orchestrator import (
 )
 from orchestrator.processing_pipeline import ProcessingPipeline
 from orchestrator.workflow_state import WorkflowTracker
+from agents.agent_coordinator import AgentCoordinator
+from agents.decision_agent.decision_agent import DecisionAgent
 from agents.fraud_agent.fraud_agent import FraudDetectionAgent
+from agents.policy_agent.policy_agent import PolicyAgent
+from agents.reconciliation_agent.reconciliation_agent import ReconciliationAgent
+from database.database import (
+    get_connection,
+    get_decision_metrics,
+    get_decision_result_by_transaction_id,
+    get_transaction_by_id,
+    init_db,
+)
 from fraud_detection.fraud_service import FraudService
 from reconciliation.engine import ReconciliationEngine
 from reconciliation.ledger_repository import LedgerRepository
@@ -80,11 +91,26 @@ fraud_service = FraudService(
     publisher=publisher,
     workflow_tracker=workflow_tracker,
 )
+
+# Day 7: Multi-Agent Consensus Singletons
+reconciliation_agent = ReconciliationAgent(service=reconciliation_service)
+policy_agent = PolicyAgent()
+decision_agent = DecisionAgent()
+agent_coordinator = AgentCoordinator(
+    reconciliation_agent=reconciliation_agent,
+    fraud_agent=fraud_agent,
+    policy_agent=policy_agent,
+    decision_agent=decision_agent,
+    publisher=publisher,
+    workflow_tracker=workflow_tracker,
+)
+
 pipeline = ProcessingPipeline(
     orchestrator=orchestrator,
     workflow_tracker=workflow_tracker,
     reconciliation_service=reconciliation_service,
     fraud_service=fraud_service,
+    agent_coordinator=agent_coordinator,
 )
 
 
@@ -467,6 +493,67 @@ def get_fraud_analysis_endpoint(transaction_id: str) -> Dict[str, Any]:
             detail=f"Fraud analysis for transaction '{transaction_id}' not found.",
         )
     return analysis
+
+
+# ==============================================================================
+# Multi-Agent Coordination & Consensus Endpoints (Day 7)
+# ==============================================================================
+
+class DecisionAnalyzeRequest(BaseModel):
+    """Request model for on-demand multi-agent consensus decision."""
+
+    transaction_id: str = Field(description="Unique transaction ID to evaluate across multi-agent consensus.")
+
+
+@app.post(
+    "/decision/analyze",
+    tags=["Multi-Agent Consensus"],
+    summary="Run Multi-Agent Decision Consensus",
+    status_code=status.HTTP_200_OK,
+)
+def analyze_decision_endpoint(request: DecisionAnalyzeRequest) -> Dict[str, Any]:
+    """Execute independent specialized agents and combine into authoritative consensus disposition."""
+    with get_connection(agent_coordinator.db_path) as conn:
+        row = get_transaction_by_id(conn, request.transaction_id)
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction '{request.transaction_id}' not found for decision analysis.",
+        )
+    tx = Transaction(**row)
+    result = agent_coordinator.coordinate_decision(tx)
+    return result.model_dump()
+
+
+
+@app.get(
+    "/decision/metrics",
+    tags=["Multi-Agent Consensus"],
+    summary="Get Multi-Agent Consensus Metrics",
+    status_code=status.HTTP_200_OK,
+)
+def get_decision_metrics_endpoint() -> Dict[str, Any]:
+    """Retrieve aggregate multi-agent consensus decisions and agreement metrics."""
+    with get_connection(agent_coordinator.db_path) as conn:
+        return get_decision_metrics(conn)
+
+
+@app.get(
+    "/decision/{transaction_id}",
+    tags=["Multi-Agent Consensus"],
+    summary="Get Multi-Agent Decision Result",
+    status_code=status.HTTP_200_OK,
+)
+def get_decision_result_endpoint(transaction_id: str) -> Dict[str, Any]:
+    """Retrieve stored multi-agent consensus disposition and explainable audit trail."""
+    with get_connection(agent_coordinator.db_path) as conn:
+        decision = get_decision_result_by_transaction_id(conn, transaction_id)
+    if not decision:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Decision for transaction '{transaction_id}' not found.",
+        )
+    return decision
 
 
 if __name__ == "__main__":

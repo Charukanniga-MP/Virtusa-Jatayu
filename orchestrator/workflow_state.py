@@ -31,6 +31,12 @@ class StageStatus(str, Enum):
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"
 
+    # Multi-Agent Consensus Workflow States (Day 7)
+    CONSENSUS_DECISION_REQUESTED = "CONSENSUS_DECISION_REQUESTED"
+    CONSENSUS_IN_PROGRESS = "CONSENSUS_IN_PROGRESS"
+    CONSENSUS_DECISION_COMPLETED = "CONSENSUS_DECISION_COMPLETED"
+    FINAL_DISPOSITION = "FINAL_DISPOSITION"
+
 
 class WorkflowState(BaseModel):
     """Snapshot model of a transaction processing workflow."""
@@ -43,6 +49,7 @@ class WorkflowState(BaseModel):
             "reconciliation": StageStatus.PENDING.value,
             "fraud_analysis": StageStatus.PENDING.value,
             "risk_analysis": StageStatus.PENDING.value,
+            "consensus_decision": StageStatus.PENDING.value,
             "final_decision": StageStatus.PENDING.value,
         }
     )

@@ -35,7 +35,7 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 
 ---
 
-## Current Status: Days 1, 2, 3, 4, 5 & 6 Completed (195/195 Tests Passing)
+## Current Status: Days 1, 2, 3, 4, 5, 6 & 7 Completed (241/241 Tests Passing)
 
 ### Day 1 — Foundation & Architecture
 - **Project Architecture & Layout:** Modular package structure with isolated agent directories, orchestrator, legacy simulator, and database layers.
@@ -102,8 +102,40 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 - **Safety Guarantees:** Never modifies amounts, account numbers, currencies, ledger balances, or reconciliation outcomes; never deletes transactions.
 - **Event Pipeline Integration:** Handler listening for `FRAUD_ANALYSIS_REQUESTED` and emitting `FRAUD_ANALYSIS_COMPLETED` with masked account IDs.
 - **Database Persistence & REST APIs:** `fraud_analyses` table, `POST /fraud/analyze`, `GET /fraud/{transaction_id}`, and `GET /fraud/metrics`.
-- **Automated Test Suite:** 195/195 passing tests (18 Day 1 + 20 Day 2 + 25 Day 3 + 35 Day 4 + 47 Day 5 + 50 Day 6).
+- **Automated Test Suite:** 195/195 passing tests.
 - **10,000-Record Benchmark:** 10,000 transactions processed in 2.18 seconds (~4,588 tx/second, 0.22 ms/tx).
+
+### Day 7 — Multi-Agent Coordination & Risk Decision Consensus
+- **4 Specialized Domain Agents (`agents/`):**
+  - `ReconciliationAgent` (`agents/reconciliation_agent/reconciliation_agent.py`): Wraps Day 5 two-stage fuzzy/deterministic reconciliation into standardized `BaseAgent` contract.
+  - `FraudDetectionAgent` (`agents/fraud_agent/fraud_agent.py`): 7-feature deterministic risk grader implementing `BaseAgent` metadata and auditable `AgentExecutionRecord`.
+  - `PolicyAgent` (`agents/policy_agent/policy_agent.py`): Evaluates governance and regulatory policy rules (`CRITICAL_FRAUD_RISK`, `HIGH_FRAUD_RISK`, `RECONCILIATION_AMBIGUITY`, `RECONCILIATION_MISMATCH`, `MISSING_LEDGER_ENTRY`, `COMBINED_HIGH_RISK`, `TRANSACTION_LIMIT_BREACH`).
+  - `DecisionAgent` & `ConsensusEngine` (`agents/decision_agent/decision_agent.py`): Centralized consensus arbitrator resolving conflicting agent recommendations deterministically.
+- **Deterministic Consensus Precedence Hierarchy:**
+  - Strict priority order: `BLOCK_RECOMMENDED > MANUAL_REVIEW > APPROVE`.
+  - Consensus Rule 1: Critical fraud score ($\ge 75$) mandates `BLOCK_RECOMMENDED` overriding clean reconciliation match.
+  - Consensus Rule 2: Elevated fraud score ($50 \le \text{score} < 75$) mandates `MANUAL_REVIEW`.
+  - Consensus Rule 3: Ambiguous candidate match mandates `MANUAL_REVIEW`.
+  - Consensus Rule 4: Missing ledger entry mandates `MANUAL_REVIEW`.
+  - Consensus Rule 5: Ledger mismatch coupled with elevated fraud mandates `BLOCK_RECOMMENDED` (Compound Risk).
+  - Consensus Rule 6: Matched ledger, low fraud ($<25$), clear policy yields `APPROVE`.
+- **Agreement Confidence Scoring & Disagreement Detection:**
+  - Confidence score strictly bounded in `[0.0, 1.0]`. Unanimous alignment scores `0.95–1.00`, inter-agent divergence scores `0.70–0.85`, and agent execution failures score `0.50–0.65`.
+  - Full disagreement tracking records specific posture divergences (e.g., Reconciliation matched, but Fraud Agent detected CRITICAL threat).
+- **Zero-Trust Safety Safeguards:**
+  - **Fail-Safe Invariant:** `Agent Failure != Approval`. Any unhandled agent exception automatically falls back to `MANUAL_REVIEW` with penalized confidence.
+  - **Zero-Mutation Invariant:** Transaction amount, account, currency, and individual agent outcomes are strictly immutable.
+- **Coordinator & Persistence Orchestration (`agents/agent_coordinator.py`):**
+  - Manages sequential execution across all 4 agents, idempotency caching, masked audit event emissions (`CONSENSUS_DECISION_REQUESTED`, `CONSENSUS_DECISION_COMPLETED`), and workflow state tracking.
+  - SQLite persistence in indexed `decision_results` table.
+- **REST APIs:**
+  - `POST /decision/analyze`: Run multi-agent consensus coordination for a transaction.
+  - `GET /decision/metrics`: Aggregated disposition breakdown, average confidence, disagreement count, and agent performance.
+  - `GET /decision/{transaction_id}`: Retrieve authoritative decision record and audit explanations.
+- **Interactive Demo & Performance Benchmark:**
+  - `scripts/demo_day7_consensus.py`: Interactive verification across all 5 core consensus scenarios.
+  - `scripts/benchmark_day7.py`: 10,000-record benchmark (1,153s, 8.67 tx/s across 4 agents with SQLite persistence, 75.37% APPROVE, 24.63% MANUAL_REVIEW, 0% BLOCK_RECOMMENDED, Average Confidence: 0.9475, 0 system failures).
+- **Test Suite Verification:** 241/241 passing tests (46 Day 7 tests, 0 regressions across Days 1–6).
 
 ---
 
@@ -596,13 +628,19 @@ Day 5 introduces a deterministic fuzzy candidate-matching layer that identifies 
   }
   ```
 
-### Running Performance Benchmarks
+### Running Performance Benchmarks & Demos
 ```powershell
 # Day 5: 10,000-Record Fuzzy Candidate Reconciliation Benchmark
 python scripts/benchmark_day5.py
 
 # Day 6: 10,000-Record Fraud Detection Agent Benchmark
 python scripts/benchmark_day6.py
+
+# Day 7: 5-Scenario Interactive Multi-Agent Consensus Demonstration
+python scripts/demo_day7_consensus.py
+
+# Day 7: 10,000-Record Multi-Agent Consensus Coordination Benchmark
+python scripts/benchmark_day7.py
 ```
 
 ---
@@ -614,19 +652,27 @@ ZT-LedgerGuard/
 │
 ├── agents/
 │   ├── __init__.py
+│   ├── base_agent.py               # BaseAgent ABC & AgentExecutionRecord dataclass
+│   ├── agent_coordinator.py        # AgentCoordinator (sequential execution, idempotency, events)
 │   ├── reconciliation_agent/
+│   │   ├── __init__.py
+│   │   └── reconciliation_agent.py # ReconciliationAgent wrapping two-stage reconciliation
 │   ├── fraud_agent/
 │   │   ├── __init__.py
-│   │   └── fraud_agent.py          # Autonomous Deterministic Fraud Detection Agent
-│   ├── risk_agent/
-│   └── privacy_agent/
+│   │   └── fraud_agent.py          # FraudDetectionAgent implementing BaseAgent
+│   ├── policy_agent/
+│   │   ├── __init__.py
+│   │   └── policy_agent.py         # PolicyAgent governance & regulatory compliance rules
+│   └── decision_agent/
+│       ├── __init__.py
+│       └── decision_agent.py       # DecisionAgent, ConsensusEngine & DecisionPrecedence
 │
 ├── orchestrator/
 │   ├── __init__.py
 │   ├── event_orchestrator.py       # Event bus, idempotency, bounded retries
-│   ├── event_types.py              # Canonical EventType enum (incl. FRAUD_ANALYSIS_*)
-│   ├── handlers.py                 # BaseEventHandler & placeholder handlers
-│   ├── workflow_state.py           # Thread-safe WorkflowTracker & fraud stages
+│   ├── event_types.py              # Canonical EventType enum (incl. CONSENSUS_DECISION_*)
+│   ├── handlers.py                 # BaseEventHandler & handler registry
+│   ├── workflow_state.py           # Thread-safe WorkflowTracker & consensus stages
 │   ├── event_audit.py              # Immutable EventAuditTrail
 │   └── processing_pipeline.py      # End-to-end transaction coordinator
 │
@@ -668,7 +714,7 @@ ZT-LedgerGuard/
 │
 ├── database/
 │   ├── __init__.py
-│   └── database.py                 # SQLite persistence, fraud_analyses & candidate queries
+│   └── database.py                 # SQLite persistence, decision_results & metrics queries
 │
 ├── data/
 │   ├── __init__.py
@@ -682,7 +728,8 @@ ZT-LedgerGuard/
 │   ├── test_day3.py                # Day 3 test suite (25 tests)
 │   ├── test_day4.py                # Day 4 test suite (35 tests)
 │   ├── test_day5.py                # Day 5 test suite (47 tests)
-│   └── test_day6.py                # Day 6 test suite (50 tests)
+│   ├── test_day6.py                # Day 6 test suite (50 tests)
+│   └── test_day7.py                # Day 7 test suite (46 tests)
 │
 ├── scripts/
 │   ├── __init__.py
@@ -690,7 +737,9 @@ ZT-LedgerGuard/
 │   ├── benchmark_day3.py           # Day 3 100-transaction benchmark
 │   ├── benchmark_day4.py           # Day 4 1,000-record reconciliation benchmark
 │   ├── benchmark_day5.py           # Day 5 10,000-record fuzzy candidate benchmark
-│   └── benchmark_day6.py           # Day 6 10,000-record fraud detection benchmark
+│   ├── benchmark_day6.py           # Day 6 10,000-record fraud detection benchmark
+│   ├── demo_day7_consensus.py      # Day 7 5-scenario interactive consensus demonstration
+│   └── benchmark_day7.py           # Day 7 10,000-record multi-agent consensus benchmark
 │
 ├── docs/
 │   ├── architecture.md

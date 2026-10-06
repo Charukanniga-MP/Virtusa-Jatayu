@@ -94,6 +94,10 @@ class FraudAnalysisResult(BaseModel):
         default=None,
         description="Pipeline correlation ID for end-to-end distributed tracing.",
     )
+    execution_record: Optional[Any] = Field(
+        default=None,
+        description="Auditable agent execution record if run within multi-agent workflow.",
+    )
 
     @field_validator("fraud_score")
     @classmethod
