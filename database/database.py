@@ -7,6 +7,7 @@ PostgreSQL/TimescaleDB connectors will build upon this contract in later phases.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -149,6 +150,42 @@ def init_db(db_path: Optional[str] = None) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_recon_correlation_id
             ON reconciliation_results(correlation_id);
+            """
+        )
+
+        # Fraud analyses table (Day 6)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fraud_analyses (
+                id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL,
+                fraud_score INTEGER NOT NULL,
+                risk_level TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requires_manual_review INTEGER NOT NULL,
+                block_recommended INTEGER NOT NULL,
+                indicators_json TEXT,
+                evidence_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_fraud_transaction_id
+            ON fraud_analyses(transaction_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_fraud_risk_level
+            ON fraud_analyses(risk_level);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_fraud_created_at
+            ON fraud_analyses(created_at);
             """
         )
         conn.commit()
@@ -407,6 +444,103 @@ def get_all_reconciliation_results(conn: sqlite3.Connection) -> List[Dict[str, A
     cursor.execute("SELECT * FROM reconciliation_results ORDER BY timestamp DESC")
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+def insert_fraud_analysis(conn: sqlite3.Connection, analysis_data: Dict[str, Any]) -> None:
+    """Insert or replace a fraud analysis record."""
+    query = """
+        INSERT OR REPLACE INTO fraud_analyses (
+            id, transaction_id, fraud_score, risk_level, status,
+            requires_manual_review, block_recommended, indicators_json,
+            evidence_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        analysis_data["id"],
+        analysis_data["transaction_id"],
+        int(analysis_data["fraud_score"]),
+        analysis_data["risk_level"],
+        analysis_data["status"],
+        1 if analysis_data.get("requires_manual_review") else 0,
+        1 if analysis_data.get("block_recommended") else 0,
+        analysis_data.get("indicators_json", "[]"),
+        analysis_data.get("evidence_json", "[]"),
+        analysis_data["created_at"],
+    )
+    with conn:
+        conn.execute(query, params)
+
+
+def get_fraud_analysis_by_transaction_id(
+    conn: sqlite3.Connection, transaction_id: str
+) -> Optional[Dict[str, Any]]:
+    """Retrieve the most recent fraud analysis for a transaction."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM fraud_analyses WHERE transaction_id = ? ORDER BY created_at DESC LIMIT 1",
+        (transaction_id,),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_fraud_analysis_by_id(
+    conn: sqlite3.Connection, analysis_id: str
+) -> Optional[Dict[str, Any]]:
+    """Retrieve a fraud analysis record by its primary ID."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM fraud_analyses WHERE id = ?", (analysis_id,))
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_all_fraud_analyses(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Retrieve all fraud analyses ordered by timestamp."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM fraud_analyses ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_fraud_metrics(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Calculate aggregated fraud assessment metrics."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            COUNT(*) as total_analyzed,
+            SUM(CASE WHEN risk_level = 'LOW' THEN 1 ELSE 0 END) as low_count,
+            SUM(CASE WHEN risk_level = 'MEDIUM' THEN 1 ELSE 0 END) as medium_count,
+            SUM(CASE WHEN risk_level = 'HIGH' THEN 1 ELSE 0 END) as high_count,
+            SUM(CASE WHEN risk_level = 'CRITICAL' THEN 1 ELSE 0 END) as critical_count,
+            SUM(CASE WHEN requires_manual_review = 1 THEN 1 ELSE 0 END) as manual_review_count,
+            SUM(CASE WHEN block_recommended = 1 THEN 1 ELSE 0 END) as block_recommended_count,
+            AVG(fraud_score) as average_score
+        FROM fraud_analyses
+        """
+    )
+    row = cursor.fetchone()
+    if not row or row["total_analyzed"] == 0:
+        return {
+            "total_analyzed": 0,
+            "low_count": 0,
+            "medium_count": 0,
+            "high_count": 0,
+            "critical_count": 0,
+            "manual_review_count": 0,
+            "block_recommended_count": 0,
+            "average_score": 0.0,
+        }
+    return {
+        "total_analyzed": row["total_analyzed"],
+        "low_count": row["low_count"] or 0,
+        "medium_count": row["medium_count"] or 0,
+        "high_count": row["high_count"] or 0,
+        "critical_count": row["critical_count"] or 0,
+        "manual_review_count": row["manual_review_count"] or 0,
+        "block_recommended_count": row["block_recommended_count"] or 0,
+        "average_score": round(float(row["average_score"] or 0.0), 2),
+    }
 
 
 

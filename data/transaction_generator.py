@@ -145,3 +145,124 @@ class TransactionGenerator:
             if interval_seconds > 0.0:
                 time.sleep(interval_seconds)
             yield tx
+
+    def generate_fraud_scenario(
+        self, scenario_type: str, account_id: Optional[str] = None
+    ) -> List[Transaction]:
+        """Generate transactions tailored to trigger specific fraud behavioral patterns.
+
+        Supported scenarios:
+            'normal': Single typical everyday transaction (LOW risk).
+            'amount_anomaly': Transaction with exceptionally high amount (MEDIUM/HIGH risk).
+            'velocity_burst': High frequency burst of transactions within 60s (HIGH/CRITICAL).
+            'rapid_repeated': Rapid identical amount transactions within repeat window.
+            'unusual_time': Transaction occurring in the middle of the night (03:00 AM).
+            'multi_indicator': Extreme anomaly combining high amount, off-hours, and high velocity.
+        """
+        acc = account_id or self.account_pool[0]
+        base_time = datetime.now(timezone.utc)
+
+        if scenario_type == "normal":
+            return [
+                Transaction(
+                    transaction_id=f"TXN-NORM-{self.rng.randint(1000, 9999)}",
+                    account_id=acc,
+                    transaction_type="PAYMENT",
+                    amount=150.00,
+                    currency="USD",
+                    transaction_timestamp=base_time.replace(hour=14, minute=30),
+                    source_system="WEB_PORTAL",
+                    destination_system="INTERNAL_LEDGER",
+                    reference_id=f"REF-NORM-{self.rng.randint(1000, 9999)}",
+                )
+            ]
+
+        if scenario_type == "amount_anomaly":
+            return [
+                Transaction(
+                    transaction_id=f"TXN-ANOM-{self.rng.randint(1000, 9999)}",
+                    account_id=acc,
+                    transaction_type="TRANSFER",
+                    amount=125000.00,  # 25x normal baseline
+                    currency="USD",
+                    transaction_timestamp=base_time.replace(hour=14, minute=30),
+                    source_system="ONLINE_BANKING",
+                    destination_system="ACH_NETWORK",
+                    reference_id=f"REF-ANOM-{self.rng.randint(1000, 9999)}",
+                )
+            ]
+
+        if scenario_type == "velocity_burst":
+            txs = []
+            burst_start = base_time.replace(hour=14, minute=30)
+            for i in range(8):
+                txs.append(
+                    Transaction(
+                        transaction_id=f"TXN-VEL-{i:03d}-{self.rng.randint(1000, 9999)}",
+                        account_id=acc,
+                        transaction_type="CARD_PAYMENT",
+                        amount=round(self.rng.uniform(20.0, 100.0), 2),
+                        currency="USD",
+                        transaction_timestamp=burst_start + timedelta(seconds=i * 5),
+                        source_system="POS_TERMINAL",
+                        destination_system="CARD_RAILS",
+                        reference_id=f"REF-VEL-{i:03d}",
+                    )
+                )
+            return txs
+
+        if scenario_type == "rapid_repeated":
+            txs = []
+            rep_start = base_time.replace(hour=14, minute=30)
+            for i in range(4):
+                txs.append(
+                    Transaction(
+                        transaction_id=f"TXN-REP-{i:03d}-{self.rng.randint(1000, 9999)}",
+                        account_id=acc,
+                        transaction_type="TRANSFER",
+                        amount=5000.00,
+                        currency="USD",
+                        transaction_timestamp=rep_start + timedelta(seconds=i * 15),
+                        source_system="MOBILE_APP",
+                        destination_system="SEPA",
+                        reference_id=f"REF-REP-{i:03d}",
+                    )
+                )
+            return txs
+
+        if scenario_type == "unusual_time":
+            return [
+                Transaction(
+                    transaction_id=f"TXN-TIME-{self.rng.randint(1000, 9999)}",
+                    account_id=acc,
+                    transaction_type="WITHDRAWAL",
+                    amount=200.00,
+                    currency="USD",
+                    transaction_timestamp=base_time.replace(hour=3, minute=15, second=0),
+                    source_system="ATM_NETWORK",
+                    destination_system="INTERNAL_LEDGER",
+                    reference_id=f"REF-TIME-{self.rng.randint(1000, 9999)}",
+                )
+            ]
+
+        if scenario_type == "multi_indicator":
+            txs = []
+            night_time = base_time.replace(hour=2, minute=45, second=0)
+            # Burst of huge amount transactions at night
+            for i in range(5):
+                txs.append(
+                    Transaction(
+                        transaction_id=f"TXN-MULTI-{i:03d}-{self.rng.randint(1000, 9999)}",
+                        account_id=acc,
+                        transaction_type="INTERNATIONAL_TRANSFER",
+                        amount=95000.00,
+                        currency="EUR",  # Deviates from USD baseline
+                        transaction_timestamp=night_time + timedelta(seconds=i * 10),
+                        source_system="SWIFT_GATEWAY",
+                        destination_system="FEDWIRE",
+                        reference_id=f"REF-MULTI-{i:03d}",
+                    )
+                )
+            return txs
+
+        return [self.generate_transaction()]

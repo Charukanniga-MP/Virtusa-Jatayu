@@ -34,6 +34,8 @@ from orchestrator.event_orchestrator import (
 )
 from orchestrator.processing_pipeline import ProcessingPipeline
 from orchestrator.workflow_state import WorkflowTracker
+from agents.fraud_agent.fraud_agent import FraudDetectionAgent
+from fraud_detection.fraud_service import FraudService
 from reconciliation.engine import ReconciliationEngine
 from reconciliation.ledger_repository import LedgerRepository
 from reconciliation.models import Transaction
@@ -72,10 +74,17 @@ reconciliation_service = ReconciliationService(
     publisher=publisher,
     workflow_tracker=workflow_tracker,
 )
+fraud_agent = FraudDetectionAgent()
+fraud_service = FraudService(
+    agent=fraud_agent,
+    publisher=publisher,
+    workflow_tracker=workflow_tracker,
+)
 pipeline = ProcessingPipeline(
     orchestrator=orchestrator,
     workflow_tracker=workflow_tracker,
     reconciliation_service=reconciliation_service,
+    fraud_service=fraud_service,
 )
 
 
@@ -398,6 +407,66 @@ def get_reconciliation_result_endpoint(reconciliation_id: str) -> Dict[str, Any]
             detail=f"Reconciliation result '{reconciliation_id}' not found.",
         )
     return result.model_dump()
+
+
+class FraudAnalysisRequest(BaseModel):
+    """Request model for on-demand fraud analysis of a transaction."""
+
+    transaction_id: str = Field(description="Unique transaction ID to evaluate for fraud.")
+
+
+@app.post(
+    "/fraud/analyze",
+    tags=["Fraud Triage"],
+    summary="Analyze Transaction Fraud Risk",
+    status_code=status.HTTP_200_OK,
+)
+def analyze_transaction_endpoint(request: FraudAnalysisRequest) -> Dict[str, Any]:
+    """Execute deterministic fraud triage and risk scoring for a transaction."""
+    result = fraud_service.analyze_by_transaction_id(request.transaction_id)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction '{request.transaction_id}' not found for fraud analysis.",
+        )
+    return {
+        "transaction_id": result.transaction_id,
+        "fraud_score": result.fraud_score,
+        "risk_level": result.risk_level.value,
+        "status": result.status.value,
+        "requires_manual_review": result.requires_manual_review,
+        "block_recommended": result.block_recommended,
+        "indicators": result.indicators,
+        "evidence": [e.model_dump() for e in result.evidence],
+    }
+
+
+@app.get(
+    "/fraud/metrics",
+    tags=["Fraud Triage"],
+    summary="Get Fraud Triage Metrics",
+    status_code=status.HTTP_200_OK,
+)
+def get_fraud_metrics_endpoint() -> Dict[str, Any]:
+    """Retrieve aggregate fraud assessment and triage metrics."""
+    return fraud_service.get_metrics()
+
+
+@app.get(
+    "/fraud/{transaction_id}",
+    tags=["Fraud Triage"],
+    summary="Get Fraud Analysis Result",
+    status_code=status.HTTP_200_OK,
+)
+def get_fraud_analysis_endpoint(transaction_id: str) -> Dict[str, Any]:
+    """Retrieve stored fraud analysis and explainable evidence by transaction ID."""
+    analysis = fraud_service.get_fraud_analysis(transaction_id)
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Fraud analysis for transaction '{transaction_id}' not found.",
+        )
+    return analysis
 
 
 if __name__ == "__main__":

@@ -39,10 +39,12 @@ class ProcessingPipeline:
         orchestrator: EventOrchestrator,
         workflow_tracker: Optional[WorkflowTracker] = None,
         reconciliation_service: Optional[Any] = None,
+        fraud_service: Optional[Any] = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.tracker = workflow_tracker or WorkflowTracker()
         self.reconciliation_service = reconciliation_service
+        self.fraud_service = fraud_service
         self._register_pipeline_handlers()
 
     def _register_pipeline_handlers(self) -> None:
@@ -108,6 +110,9 @@ class ProcessingPipeline:
 
         # 4. FRAUD_ANALYSIS_REQUESTED -> Fraud Completed
         def on_fraud_requested(event: Event) -> Dict[str, Any]:
+            if self.fraud_service:
+                return self.fraud_service.on_fraud_requested(event)
+
             self.tracker.update_stage(event.correlation_id, "fraud_analysis", StageStatus.COMPLETED.value)
             fraud_completed_event = Event(
                 event_type=EventType.FRAUD_ANALYSIS_COMPLETED.value,

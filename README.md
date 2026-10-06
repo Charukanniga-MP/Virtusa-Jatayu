@@ -35,7 +35,7 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 
 ---
 
-## Current Status: Days 1, 2, 3, 4 & 5 Completed (145/145 Tests Passing)
+## Current Status: Days 1, 2, 3, 4, 5 & 6 Completed (195/195 Tests Passing)
 
 ### Day 1 — Foundation & Architecture
 - **Project Architecture & Layout:** Modular package structure with isolated agent directories, orchestrator, legacy simulator, and database layers.
@@ -80,14 +80,30 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 - **Ambiguity Detection & Manual Review:** Competing candidates within `ambiguity_margin` (0.03) are classified as `AMBIGUOUS` with `requires_manual_review = True`.
 - **Two-Stage Reconciliation Pipeline:** Stage 1 (Candidate Discovery) -> Stage 2 (Deterministic Verification Engine).
 - **New Events & Endpoints:** `FUZZY_CANDIDATE_IDENTIFIED` event, `POST /reconciliation/candidates`, and `GET /reconciliation/candidates/{transaction_id}`.
-- **Automated Test Suite:** 145/145 passing tests (18 Day 1 + 20 Day 2 + 25 Day 3 + 35 Day 4 + 47 Day 5).
 - **10,000-Record Benchmark:** 10,000 transactions processed in 3.25 seconds (~3,073 records/second).
-- **REST Endpoints Added:**
-  - `POST /reconciliation/run`: Manually trigger reconciliation for a transaction.
-  - `GET /reconciliation/{reconciliation_id}`: Retrieve full reconciliation result and explainable evidence.
-  - `GET /reconciliation/metrics`: Real-time aggregated reconciliation counts (`total`, `matched`, `partial_match`, `mismatched`, `not_found`, `average_score`).
-- **Automated Test Suite:** 98/98 passing tests (18 Day 1 + 20 Day 2 + 25 Day 3 + 35 Day 4).
-- **1,000-Record Benchmark:** 1,000 transactions reconciled in 0.21s (~4,800 records/sec) with transparent score distributions.
+
+### Day 6 — Autonomous Deterministic Fraud Detection Agent
+- **Autonomous Intelligence Layer:** Explainable, deterministic `FraudDetectionAgent` (`agents/fraud_agent/fraud_agent.py`) analyzing transactions downstream of reconciliation without LLM dependencies, Gemini, Ollama, LangChain, Kafka, or Docker.
+- **7 Deterministic Feature Extractors:** Amount anomaly, transaction velocity burst (60s), rapid repeated transactions (120s), unusual transaction time (22:00–06:00), account behavior deviation, reconciliation anomaly, and repeated failed activity.
+- **7 Independent Fraud Rules & Transparent Evidence:**
+  - `HIGH_AMOUNT_ANOMALY` (25 pts)
+  - `HIGH_TRANSACTION_VELOCITY` (25 pts)
+  - `RAPID_REPEATED_TRANSACTION` (15 pts)
+  - `UNUSUAL_TRANSACTION_TIME` (10 pts)
+  - `ACCOUNT_BEHAVIOR_DEVIATION` (15 pts)
+  - `RECONCILIATION_ANOMALY` (10 pts)
+  - `REPEATED_FAILED_ACTIVITY` (10 pts)
+- **Anti-Double-Counting Safeguards:** Dampens correlated ceiling spikes when amount anomalies are already triggered by the exact same value.
+- **Bounded Scoring & Risk Tiers:** Risk score strictly bounded in `[0, 100]`:
+  - `LOW` (0–24): Normal operations
+  - `MEDIUM` (25–49): Audited baseline anomaly
+  - `HIGH` (50–74): Flagged for human triage (`requires_manual_review = True`)
+  - `CRITICAL` (75–100): High threat (`requires_manual_review = True`, `block_recommended = True`)
+- **Safety Guarantees:** Never modifies amounts, account numbers, currencies, ledger balances, or reconciliation outcomes; never deletes transactions.
+- **Event Pipeline Integration:** Handler listening for `FRAUD_ANALYSIS_REQUESTED` and emitting `FRAUD_ANALYSIS_COMPLETED` with masked account IDs.
+- **Database Persistence & REST APIs:** `fraud_analyses` table, `POST /fraud/analyze`, `GET /fraud/{transaction_id}`, and `GET /fraud/metrics`.
+- **Automated Test Suite:** 195/195 passing tests (18 Day 1 + 20 Day 2 + 25 Day 3 + 35 Day 4 + 47 Day 5 + 50 Day 6).
+- **10,000-Record Benchmark:** 10,000 transactions processed in 2.18 seconds (~4,588 tx/second, 0.22 ms/tx).
 
 ---
 
@@ -537,9 +553,56 @@ Day 5 introduces a deterministic fuzzy candidate-matching layer that identifies 
   ```
 - **`GET /reconciliation/candidates/{transaction_id}`:** Retrieve full candidate ranking, field similarity scores, and explainable evidence.
 
-### Running the 10,000-Record Fuzzy Benchmark
+### Day 6 REST API Endpoints
+
+- **`POST /fraud/analyze`:** On-demand deterministic fraud evaluation for a transaction.
+  ```json
+  // Request
+  { "transaction_id": "TXN-000001" }
+
+  // Response
+  {
+    "transaction_id": "TXN-000001",
+    "fraud_score": 60.0,
+    "risk_level": "HIGH",
+    "status": "MANUAL_REVIEW",
+    "requires_manual_review": true,
+    "block_recommended": false,
+    "indicators": ["HIGH_AMOUNT_ANOMALY", "RECONCILIATION_ANOMALY"],
+    "evidence": [
+      {
+        "rule_id": "HIGH_AMOUNT_ANOMALY",
+        "score_contribution": 25.0,
+        "reason": "Transaction amount 75000.00 significantly exceeds baseline average 5000.00 (15.00x).",
+        "evidence": { "amount": 75000.0, "average_amount": 5000.0, "ratio": 15.0 }
+      }
+    ],
+    "analysis_timestamp": "2026-10-06T12:00:00Z",
+    "model_version": "1.0.0-deterministic"
+  }
+  ```
+- **`GET /fraud/{transaction_id}`:** Retrieve persisted fraud analysis record and transparent rule-by-rule evidence.
+- **`GET /fraud/metrics`:** Aggregated operational fraud metrics:
+  ```json
+  {
+    "total_analyzed": 10000,
+    "low_count": 7616,
+    "medium_count": 1526,
+    "high_count": 323,
+    "critical_count": 535,
+    "manual_review_count": 858,
+    "block_recommended_count": 535,
+    "average_score": 15.41
+  }
+  ```
+
+### Running Performance Benchmarks
 ```powershell
+# Day 5: 10,000-Record Fuzzy Candidate Reconciliation Benchmark
 python scripts/benchmark_day5.py
+
+# Day 6: 10,000-Record Fraud Detection Agent Benchmark
+python scripts/benchmark_day6.py
 ```
 
 ---
@@ -553,15 +616,17 @@ ZT-LedgerGuard/
 │   ├── __init__.py
 │   ├── reconciliation_agent/
 │   ├── fraud_agent/
+│   │   ├── __init__.py
+│   │   └── fraud_agent.py          # Autonomous Deterministic Fraud Detection Agent
 │   ├── risk_agent/
 │   └── privacy_agent/
 │
 ├── orchestrator/
 │   ├── __init__.py
 │   ├── event_orchestrator.py       # Event bus, idempotency, bounded retries
-│   ├── event_types.py              # Canonical EventType enum
+│   ├── event_types.py              # Canonical EventType enum (incl. FRAUD_ANALYSIS_*)
 │   ├── handlers.py                 # BaseEventHandler & placeholder handlers
-│   ├── workflow_state.py           # Thread-safe WorkflowTracker & stages
+│   ├── workflow_state.py           # Thread-safe WorkflowTracker & fraud stages
 │   ├── event_audit.py              # Immutable EventAuditTrail
 │   └── processing_pipeline.py      # End-to-end transaction coordinator
 │
@@ -585,6 +650,12 @@ ZT-LedgerGuard/
 │
 ├── fraud_detection/
 │   ├── __init__.py
+│   ├── fraud_result.py             # FraudAnalysisResult, RiskLevel, FraudStatus Pydantic models
+│   ├── features.py                 # 7 deterministic feature extractors
+│   ├── rules.py                    # 7 independent fraud evaluation rules & evidence
+│   ├── risk_engine.py              # RiskEngine, anti-double-counting safeguards, scoring
+│   ├── profile.py                  # AccountProfile & AccountProfileStore baseline tracking
+│   ├── fraud_service.py            # FraudService coordinator, SQLite persistence & events
 │   └── models.py
 │
 ├── security/
@@ -597,11 +668,11 @@ ZT-LedgerGuard/
 │
 ├── database/
 │   ├── __init__.py
-│   └── database.py                 # SQLite persistence, candidate queries & auto-migrations
+│   └── database.py                 # SQLite persistence, fraud_analyses & candidate queries
 │
 ├── data/
 │   ├── __init__.py
-│   ├── transaction_generator.py    # Deterministic synthetic transaction generator
+│   ├── transaction_generator.py    # Deterministic synthetic transaction & fraud scenarios
 │   └── ledger_generator.py         # Synthetic core ledger generator & Day 5 scenarios
 │
 ├── tests/
@@ -610,14 +681,16 @@ ZT-LedgerGuard/
 │   ├── test_day2.py                # Day 2 test suite (20 tests)
 │   ├── test_day3.py                # Day 3 test suite (25 tests)
 │   ├── test_day4.py                # Day 4 test suite (35 tests)
-│   └── test_day5.py                # Day 5 test suite (47 tests)
+│   ├── test_day5.py                # Day 5 test suite (47 tests)
+│   └── test_day6.py                # Day 6 test suite (50 tests)
 │
 ├── scripts/
 │   ├── __init__.py
 │   ├── run_transaction_stream.py   # Day 2 streaming CLI
 │   ├── benchmark_day3.py           # Day 3 100-transaction benchmark
 │   ├── benchmark_day4.py           # Day 4 1,000-record reconciliation benchmark
-│   └── benchmark_day5.py           # Day 5 10,000-record fuzzy candidate benchmark
+│   ├── benchmark_day5.py           # Day 5 10,000-record fuzzy candidate benchmark
+│   └── benchmark_day6.py           # Day 6 10,000-record fraud detection benchmark
 │
 ├── docs/
 │   ├── architecture.md

@@ -1,4 +1,5 @@
-"""Fraud Agent Module.
+"""Fraud Agent Module for ZT-LedgerGuard."""
 
-Scheduled for full development in Day 6 (real-time fraud triage and anomaly scoring).
-"""
+from agents.fraud_agent.fraud_agent import FraudDetectionAgent
+
+__all__ = ["FraudDetectionAgent"]

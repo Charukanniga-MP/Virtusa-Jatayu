@@ -80,11 +80,39 @@ This roadmap outlines the iterative engineering milestones for **ZT-LedgerGuard 
 
 ---
 
-### DAY 6: Fraud Detection Agent
-- Real-time fraud triage agent architecture.
-- Feature extraction: velocity bursts, geolocation hops, anomaly patterns.
-- Rule engine combined with preliminary machine-learning anomaly scoring.
-- Triage prioritization: Low, Medium, High, Immediate Freeze.
+### DAY 6: Fraud Detection Agent *(Completed)*
+- Autonomous, deterministic, and explainable Fraud Detection Agent (`agents/fraud_agent/fraud_agent.py`) operating without external LLM dependencies, Gemini, Ollama, LangChain, Kafka, or Docker.
+- Deterministic feature extraction engine (`fraud_detection/features.py`) computing 7 canonical features:
+  1. Amount anomaly (ratio to account historical baseline average).
+  2. Transaction velocity (windowed transaction burst count in seconds).
+  3. Rapid repeated transactions (identical amount and short interval clustering).
+  4. Unusual transaction time (configurable off-hours detection, default 22:00–06:00).
+  5. Account behavior deviation (historical ceiling/multiplier deviation).
+  6. Reconciliation anomaly integration (`MISMATCHED`, `NOT_FOUND`, `AMBIGUOUS`, `PARTIAL_MATCH`).
+  7. Repeated failed activity (prior failed validation/reconciliation counts).
+- Account profile baseline engine (`fraud_detection/profile.py`) tracking historical transaction counts, average amounts, maximum ceilings, common hours, currencies, and directions without machine learning.
+- Rule engine (`fraud_detection/rules.py`) with 7 independent deterministic rules generating transparent `RuleEvidence`:
+  - `HIGH_AMOUNT_ANOMALY` (max weight: 25)
+  - `HIGH_TRANSACTION_VELOCITY` (max weight: 25)
+  - `RAPID_REPEATED_TRANSACTION` (max weight: 15)
+  - `UNUSUAL_TRANSACTION_TIME` (max weight: 10)
+  - `ACCOUNT_BEHAVIOR_DEVIATION` (max weight: 15)
+  - `RECONCILIATION_ANOMALY` (max weight: 10)
+  - `REPEATED_FAILED_ACTIVITY` (max weight: 10)
+- Risk engine (`fraud_detection/risk_engine.py`) with anti-double-counting safeguards (prevents artificial score inflation on correlated amount anomaly spikes), capped risk score (0–100), and configurable risk tiers:
+  - `LOW` (0–24): `requires_manual_review = False`, `block_recommended = False`
+  - `MEDIUM` (25–49): `requires_manual_review = False`, `block_recommended = False`
+  - `HIGH` (50–74): `requires_manual_review = True`, `block_recommended = False`
+  - `CRITICAL` (75–100): `requires_manual_review = True`, `block_recommended = True` (transaction freeze recommendation without modifying or deleting data)
+- Structured Pydantic result model (`fraud_detection/fraud_result.py`) validating strict [0, 100] bounds.
+- Event pipeline integration: `FraudService` listening for `FRAUD_ANALYSIS_REQUESTED` and emitting `FRAUD_ANALYSIS_COMPLETED` with account number masking and causation tracking.
+- Database persistence: `fraud_analyses` table in SQLite with indexing and aggregation queries.
+- REST API endpoints:
+  - `POST /fraud/analyze`: On-demand fraud evaluation.
+  - `GET /fraud/{transaction_id}`: Retrieve stored fraud analysis result and explainable evidence.
+  - `GET /fraud/metrics`: Aggregated fraud triage metrics (total analyzed, risk tier counts, manual review count, average score).
+- 50 new comprehensive unit, integration, event, and adversarial tests (`tests/test_day6.py`), achieving 195/195 total passing tests.
+- 10,000-record performance benchmark (`scripts/benchmark_day6.py`) achieving ~4,588 transactions/second (0.22 ms/tx) locally.
 
 ---
 
