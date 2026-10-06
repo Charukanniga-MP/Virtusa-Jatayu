@@ -35,7 +35,7 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 
 ---
 
-## Current Status: Days 1, 2, 3, 4, 5, 6 & 7 Completed (241/241 Tests Passing)
+## Current Status: Days 1, 2, 3, 4, 5, 6, 7 & 8 Completed (297/297 Tests Passing)
 
 ### Day 1 — Foundation & Architecture
 - **Project Architecture & Layout:** Modular package structure with isolated agent directories, orchestrator, legacy simulator, and database layers.
@@ -136,6 +136,39 @@ Modern enterprise banking and payment infrastructures face fundamental operation
   - `scripts/demo_day7_consensus.py`: Interactive verification across all 5 core consensus scenarios.
   - `scripts/benchmark_day7.py`: 10,000-record benchmark (1,153s, 8.67 tx/s across 4 agents with SQLite persistence, 75.37% APPROVE, 24.63% MANUAL_REVIEW, 0% BLOCK_RECOMMENDED, Average Confidence: 0.9475, 0 system failures).
 - **Test Suite Verification:** 241/241 passing tests (46 Day 7 tests, 0 regressions across Days 1–6).
+
+### Day 8 — Zero-Trust Security, PII Protection & Tamper-Evident Audit
+- **Zero-Trust Security Gateway (`security/security_gateway.py`):** Lightweight perimeter validation enforcing structure, transaction ID syntax (alphanumeric/dashes/underscores), monetary bounds ($0.01$ to $10,000,000.00$), payload size limits ($1.0$ MB), and supported currencies.
+- **Trust Boundary Invariant:** Client-provided decision fields (`decision`, `fraud_score`, `risk_level`, `confidence`, `block_recommended`) are strictly untrusted and stripped at the gateway. Authoritative verdicts are always calculated server-side.
+- **PII Protection & Classification (`security/pii_protection.py`, `security/security_config.py`):**
+  - Clear 3-tier taxonomy: `PUBLIC`, `SENSITIVE`, `HIGHLY_SENSITIVE`.
+  - Visual Masking: Irreversible redaction for accounts (`ACC-*****6789`), cards (`************5678`), phones (`+********3210`), emails (`c****@domain.com`), and tax IDs (`******234F`).
+  - Deep recursive payload sanitization without in-place mutation (`sanitize_payload(payload, deep=True)`).
+- **Deterministic Surrogate Tokenization (`security/tokenization.py`):**
+  - Reversible internal surrogate tokens (`tok_<hex16>`) generated via HMAC-SHA256 with vault isolation (`TokenVault`).
+  - Safe internal correlation lookup (`lookup(token)`) and masked public lookup (`lookup_masked(token)`).
+- **Canonical Hashing & Digests (`security/hashing.py`):**
+  - Key-order-independent, whitespace-normalized, Decimal-standardized canonical JSON serialization (`canonicalize_json`).
+  - SHA-256 digests for structured transactions (`hash_transaction`), events (`hash_event`), and consensus decisions (`hash_decision`).
+- **Tamper-Evident Hash-Chain Ledger (`security/hash_chain.py`):**
+  - Sequentially linked audit blocks anchored to `GENESIS_PREVIOUS_HASH = "0"*64`.
+  - Mathematical verification (`verify_chain`) detecting payload tampering, altered event hashes, broken previous hash links, deleted blocks, and reordered sequences.
+- **Audit Integrity Service & SQLite Persistence (`security/audit_integrity.py`, `database/database.py`):**
+  - Integrates with `EventAuditTrail` to record cryptographically linked blocks in append-only SQLite `audit_chain` table.
+  - Immutability Invariant: Zero `UPDATE` or `DELETE` queries exposed in database layer.
+- **Security Telemetry & Verification APIs:**
+  - `GET /security/metrics`: Telemetry counts for checks, validation failures, PII sanitizations, and policy violations.
+  - `GET /security/audit/verify`: Cryptographic verification of the entire SQLite audit ledger.
+  - Safe error responses: Suppressed stack traces, filesystem paths, and database queries.
+- **10 Adversarial Attack Scenarios Formally Tested:** Audit payload tampering, event hash alteration, previous hash breakage, deletion, reordering, PII injection, fake decisions, fake fraud scores, oversized payloads, and malformed inputs.
+- **10,000-Record Security Benchmark (`scripts/benchmark_day8.py`):**
+  - 10,000 transactions and 10,000 audit blocks evaluated locally on Windows.
+  - Hashing: 7,830.6 hashes/sec (127.70 µs/op) | PII Sanitization: 5,981.1 ops/sec (167.19 µs/op).
+  - Hash Chain Append: 6,150.9 blocks/sec (162.58 µs/op) | Verification: 1.510s (6,622.9 blocks/sec).
+  - Security Gateway: 22,028.8 req/sec (45.40 µs/op) | Total Security Overhead: ~0.503 ms/tx.
+  - Tamper Detection Efficacy: 100.0% (Zero false negatives).
+- **Interactive Security Demo (`scripts/demo_day8_security.py`):** Demonstrates all 6 core security scenarios (normal validation, PII masking/tokenization, valid chain, tampered record detection, fake decision stripping, and injection rejection).
+- **Test Suite Verification:** 297/297 passing tests (56 new Day 8 tests, 0 regressions across Days 1–7).
 
 ---
 

@@ -52,7 +52,14 @@ from reconciliation.ledger_repository import LedgerRepository
 from reconciliation.models import Transaction
 from reconciliation.reconciliation_service import ReconciliationService
 from reconciliation.transaction_service import TransactionService
-from security.security_utils import mask_account_id
+from security import (
+    AuditIntegrityService,
+    get_audit_integrity_service,
+    get_security_gateway,
+    get_security_metrics_store,
+    mask_account_id,
+    sanitize_payload,
+)
 
 # 1. Environment Loading
 load_dotenv()
@@ -71,6 +78,12 @@ logger = logging.getLogger("main")
 # 3. Global Orchestrator, Tracker, Audit, Reconciliation, and Pipeline Singletons
 workflow_tracker = WorkflowTracker()
 audit_trail = EventAuditTrail()
+# Day 8: Cryptographic Audit Integrity Service
+audit_integrity_service = get_audit_integrity_service(db_path=os.getenv("DATABASE_PATH", "zt_ledgerguard.db"))
+audit_trail.set_integrity_service(audit_integrity_service)
+security_gateway = get_security_gateway()
+security_metrics_store = get_security_metrics_store()
+
 orchestrator = EventOrchestrator(
     workflow_tracker=workflow_tracker,
     audit_trail=audit_trail,
@@ -554,6 +567,33 @@ def get_decision_result_endpoint(transaction_id: str) -> Dict[str, Any]:
             detail=f"Decision for transaction '{transaction_id}' not found.",
         )
     return decision
+
+
+# ==============================================================================
+# Day 8: Zero-Trust Security & Audit Verification Endpoints
+# ==============================================================================
+
+@app.get(
+    "/security/metrics",
+    tags=["Security & Integrity"],
+    summary="Get Zero-Trust Security Metrics",
+    status_code=status.HTTP_200_OK,
+)
+def get_security_metrics_endpoint() -> Dict[str, Any]:
+    """Retrieve telemetry metrics for Zero-Trust validation, sanitization, and integrity checks."""
+    return security_metrics_store.get_metrics()
+
+
+@app.get(
+    "/security/audit/verify",
+    tags=["Security & Integrity"],
+    summary="Verify Tamper-Evident Audit Hash Chain",
+    status_code=status.HTTP_200_OK,
+)
+def verify_audit_chain_endpoint() -> Dict[str, Any]:
+    """Execute end-to-end cryptographic verification of the append-only audit ledger."""
+    result = audit_integrity_service.verify_chain()
+    return result.model_dump()
 
 
 if __name__ == "__main__":

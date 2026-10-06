@@ -145,10 +145,61 @@ This roadmap outlines the iterative engineering milestones for **ZT-LedgerGuard 
 
 ---
 
-### DAY 8: Zero-Trust Security and PII Protection
-- Cryptographic verification of ledger entries (hash-chain / Merkle ledger audits).
-- Differential privacy mechanisms and homomorphic / tokenized identifier queries.
-- Least-privilege agent communication boundaries and mutual identity verification.
+### DAY 8: Zero-Trust Security, PII Protection & Tamper-Evident Audit *(Completed)*
+- **Centralized Security Configuration (`security/security_config.py`):** Canonical configuration defining `HASH_ALGORITHM = "SHA-256"`, `GENESIS_PREVIOUS_HASH = "0"*64`, `TOKEN_PREFIX = "tok_"`, payload size bounds (`MAX_REQUEST_SIZE_BYTES = 1_000_000`), monetary bounds (`0.01` to `10,000,000.00`), supported ISO currencies, and 3-tier PII classification taxonomy (`PUBLIC`, `SENSITIVE`, `HIGHLY_SENSITIVE`).
+- **Zero-Trust PII Protection & Masking (`security/pii_protection.py`):**
+  - Prefix-preserving account masking (`ACC-123456789` -> `ACC-*****6789`).
+  - Card number masking (`4111111111115678` -> `************5678`).
+  - Telephone masking (`+919876543210` -> `+********3210`).
+  - Email address masking (`charu@virtusabank.com` -> `c****@virtusabank.com`).
+  - National ID / tax identifier masking (`ABCDE1234F` -> `******234F`).
+  - Deep recursive payload sanitization without in-place mutation (`sanitize_payload(payload, deep=True)`).
+- **Deterministic Surrogate Tokenization (`security/tokenization.py`):**
+  - Reversible internal surrogate tokens (`tok_<hex16>`) generated via HMAC-SHA256 with vault isolation (`TokenVault`).
+  - Internal vault lookup (`lookup(token)`) for authorized core correlation without exposing raw identifiers.
+  - Public masked lookup (`lookup_masked(token)`) ensuring public APIs never leak raw PII.
+  - Clear architectural distinction between Visual Masking, Surrogate Tokenization, Canonical Hashing, and Confidentiality Encryption.
+- **Canonical Hashing & Cryptographic Digests (`security/hashing.py`):**
+  - Key-order-independent, whitespace-normalized, Decimal/float-standardized canonical JSON serialization (`canonicalize_json`).
+  - SHA-256 digests for structured transactions (`hash_transaction`), events (`hash_event`), and consensus decisions (`hash_decision`).
+  - Tokenized account inclusion in public transaction hashes to protect PII within hash digests.
+- **Append-Only Tamper-Evident Hash-Chain Ledger (`security/hash_chain.py`):**
+  - Sequentially linked audit blocks: `sequence_number`, `event_id`, `event_type`, `payload_hash`, `previous_hash`, `event_hash`.
+  - Genesis block anchored at `GENESIS_PREVIOUS_HASH = "0000000000000000000000000000000000000000000000000000000000000000"`.
+  - Mathematical integrity verification (`verify_chain`) detecting payload tampering, event hash alteration, broken previous hash links, sequence gaps, duplicates, and genesis mismatches.
+- **Audit Integrity Service & SQLite Ledger Persistence (`security/audit_integrity.py`, `database/database.py`):**
+  - `AuditIntegrityService` coordinating PII sanitization, canonical payload hashing, and hash-chain block recording.
+  - Immutability Invariant: SQLite `audit_chain` table is strictly append-only; zero `UPDATE` or `DELETE` queries exposed in codebase. Corrections are appended as new events.
+  - Event audit trail integration wiring `EventAuditTrail` directly into `AuditIntegrityService`.
+- **Zero-Trust Security Gateway & Trust Boundaries (`security/security_gateway.py`):**
+  - Gateway enforcing structural validation, transaction ID syntax (alphanumeric/dashes/underscores), monetary ceilings, content types, and payload size bounds prior to domain logic.
+  - **Trust Boundary Invariant:** Client-supplied decision fields (`decision`, `fraud_score`, `risk_level`, `confidence`, `block_recommended`) are strictly untrusted and stripped at the boundary; authoritative verdicts are recomputed exclusively server-side.
+- **Security Telemetry & REST Endpoints:**
+  - `GET /security/metrics`: Telemetry counts for security checks, validation failures, PII sanitizations, integrity checks, integrity failures, and security policy violations.
+  - `GET /security/audit/verify`: Cryptographic verification of the entire SQLite audit ledger returning status, checked event counts, and tamper locations.
+  - Safe error handling: Public API responses sanitize stack traces, filesystem paths, and database query details.
+- **10 Adversarial Attack Scenarios Formally Tested:**
+  1. Audit payload tampering -> `PAYLOAD_HASH_MISMATCH`
+  2. Event hash alteration -> `EVENT_HASH_MISMATCH`
+  3. Previous hash breakage -> `PREVIOUS_HASH_MISMATCH`
+  4. Event deletion -> `SEQUENCE_GAP`
+  5. Event reordering -> `SEQUENCE_OUT_OF_ORDER / DUPLICATE_SEQUENCE`
+  6. PII leakage injection -> Automatically sanitized/masked
+  7. Fake client decision injection -> Stripped at boundary
+  8. Fake client fraud score injection -> Stripped at boundary
+  9. Oversized request body -> `REQUEST_SIZE_EXCEEDED` (Halted)
+  10. Malformed JSON / SQL injection -> Halted at gateway
+- **Automated Test Suite:** 56 Day 8 tests (`tests/test_day8.py`), 297/297 total passing tests across Days 1–8 with 0 regressions.
+- **10,000-Record Security Benchmark (`scripts/benchmark_day8.py`):**
+  - 10,000 transactions and 10,000 audit blocks evaluated locally on Windows.
+  - Hashing throughput: 7,830.6 hashes/sec (127.70 µs/op).
+  - PII sanitization throughput: 5,981.1 ops/sec (167.19 µs/op).
+  - Hash-chain append throughput: 6,150.9 blocks/sec (162.58 µs/op).
+  - Cryptographic chain verification: 1.510s for 10,000 blocks (6,622.9 blocks/sec).
+  - Gateway throughput: 22,028.8 req/sec (45.40 µs/op).
+  - Total security overhead: ~0.503 ms/tx.
+  - Tamper detection efficacy: 100.0% (Zero false negatives).
+- **6-Scenario Interactive Security Demo (`scripts/demo_day8_security.py`):** 100% verified.
 
 ---
 

@@ -40,15 +40,25 @@ class AuditRecord(BaseModel):
     processing_status: str
     error: Optional[str] = None
     details: Dict[str, Any] = Field(default_factory=dict)
+    sequence_number: Optional[int] = Field(default=None, description="Cryptographic hash-chain sequence")
+    event_hash: Optional[str] = Field(default=None, description="Cryptographic block digest")
+    previous_hash: Optional[str] = Field(default=None, description="Predecessor block digest")
+    payload_hash: Optional[str] = Field(default=None, description="Digest of sanitized payload")
 
 
 class EventAuditTrail:
-    """Thread-safe in-memory audit log for event operations."""
+    """Thread-safe in-memory audit log for event operations with optional cryptographic integrity."""
 
-    def __init__(self) -> None:
+    def __init__(self, integrity_service: Optional[Any] = None) -> None:
         self._lock = threading.RLock()
         self._records: List[AuditRecord] = []
         self._by_correlation: Dict[str, List[AuditRecord]] = {}
+        self.integrity_service = integrity_service
+
+    def set_integrity_service(self, integrity_service: Any) -> None:
+        """Attach or update the cryptographic audit integrity service."""
+        with self._lock:
+            self.integrity_service = integrity_service
 
     def record(
         self,
@@ -63,6 +73,33 @@ class EventAuditTrail:
     ) -> AuditRecord:
         """Record an event state transition in the audit log."""
         with self._lock:
+            seq_num = None
+            ev_hash = None
+            prev_hash = None
+            pay_hash = None
+
+            # If cryptographic integrity service is attached, record to hash chain
+            if self.integrity_service is not None:
+                try:
+                    payload_to_hash = dict(details or {})
+                    payload_to_hash.update({
+                        "event_id": event_id,
+                        "event_type": str(event_type),
+                        "correlation_id": correlation_id,
+                        "processing_status": str(processing_status),
+                    })
+                    block = self.integrity_service.record_audit_event(
+                        event_id=event_id,
+                        event_type=str(event_type),
+                        payload=payload_to_hash,
+                    )
+                    seq_num = block.sequence_number
+                    ev_hash = block.event_hash
+                    prev_hash = block.previous_hash
+                    pay_hash = block.payload_hash
+                except Exception:
+                    pass
+
             rec = AuditRecord(
                 event_id=event_id,
                 event_type=str(event_type),
@@ -72,6 +109,10 @@ class EventAuditTrail:
                 processing_status=str(processing_status),
                 error=error,
                 details=details or {},
+                sequence_number=seq_num,
+                event_hash=ev_hash,
+                previous_hash=prev_hash,
+                payload_hash=pay_hash,
             )
             self._records.append(rec)
             if correlation_id not in self._by_correlation:

@@ -232,6 +232,42 @@ def init_db(db_path: Optional[str] = None) -> None:
             ON decision_results(created_at);
             """
         )
+
+        # Tamper-evident audit hash-chain table (Day 8)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_chain (
+                sequence_number INTEGER PRIMARY KEY,
+                event_id TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                previous_hash TEXT NOT NULL,
+                event_hash TEXT NOT NULL UNIQUE,
+                sanitized_payload TEXT,
+                integrity_status TEXT DEFAULT 'VALID',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_chain_event_id
+            ON audit_chain(event_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_chain_event_hash
+            ON audit_chain(event_hash);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_chain_created_at
+            ON audit_chain(created_at);
+            """
+        )
         conn.commit()
 
 
@@ -693,3 +729,169 @@ def get_decision_metrics(conn: sqlite3.Connection) -> Dict[str, Any]:
         "average_confidence": round(float(row["avg_confidence"] or 0.0), 4),
         "agent_disagreements": row["disagreement_count"] or 0,
     }
+
+
+# ==============================================================================
+# Tamper-Evident Audit Hash-Chain Operations (Day 8)
+# Zero-Trust Invariant: Append-only ledger; NO UPDATE or DELETE queries exposed.
+# ==============================================================================
+
+def insert_audit_chain_record(conn: sqlite3.Connection, record: Dict[str, Any]) -> None:
+    """Insert a cryptographically linked audit chain record into SQLite.
+
+    IMMUTABILITY INVARIANT:
+    Records are append-only. Overwriting or updating existing audit blocks is forbidden.
+    """
+    cursor = conn.cursor()
+    query = """
+    INSERT INTO audit_chain (
+        sequence_number,
+        event_id,
+        event_type,
+        timestamp,
+        payload_hash,
+        previous_hash,
+        event_hash,
+        sanitized_payload,
+        integrity_status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """
+    sanitized_json = (
+        json.dumps(record["sanitized_payload"], sort_keys=True, separators=(",", ":"))
+        if record.get("sanitized_payload") is not None
+        else None
+    )
+    cursor.execute(
+        query,
+        (
+            record["sequence_number"],
+            record["event_id"],
+            record["event_type"],
+            record["timestamp"],
+            record["payload_hash"],
+            record["previous_hash"],
+            record["event_hash"],
+            sanitized_json,
+            record.get("integrity_status", "VALID"),
+        ),
+    )
+    conn.commit()
+
+
+def get_audit_chain_records(
+    conn: sqlite3.Connection,
+    limit: Optional[int] = None,
+    start_sequence: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Retrieve audit chain records ordered strictly by sequence_number ASC."""
+    cursor = conn.cursor()
+    query = """
+    SELECT
+        sequence_number,
+        event_id,
+        event_type,
+        timestamp,
+        payload_hash,
+        previous_hash,
+        event_hash,
+        sanitized_payload,
+        integrity_status,
+        created_at
+    FROM audit_chain
+    """
+    params = []
+    if start_sequence is not None:
+        query += " WHERE sequence_number >= ?"
+        params.append(start_sequence)
+    query += " ORDER BY sequence_number ASC"
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+
+    cursor.execute(query, tuple(params))
+    rows = cursor.fetchall()
+    results = []
+    for row in rows:
+        d = dict(row)
+        if d.get("sanitized_payload"):
+            try:
+                d["sanitized_payload"] = json.loads(d["sanitized_payload"])
+            except Exception:
+                pass
+        results.append(d)
+    return results
+
+
+def get_latest_audit_chain_record(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    """Retrieve the latest block in the audit chain."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            sequence_number,
+            event_id,
+            event_type,
+            timestamp,
+            payload_hash,
+            previous_hash,
+            event_hash,
+            sanitized_payload,
+            integrity_status,
+            created_at
+        FROM audit_chain
+        ORDER BY sequence_number DESC
+        LIMIT 1;
+        """
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("sanitized_payload"):
+        try:
+            d["sanitized_payload"] = json.loads(d["sanitized_payload"])
+        except Exception:
+            pass
+    return d
+
+
+def get_audit_chain_count(conn: sqlite3.Connection) -> int:
+    """Return the total number of blocks in the audit chain."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM audit_chain;")
+    row = cursor.fetchone()
+    return row[0] if row else 0
+
+
+def get_audit_chain_record_by_event_id(conn: sqlite3.Connection, event_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a specific audit block by its event_id."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            sequence_number,
+            event_id,
+            event_type,
+            timestamp,
+            payload_hash,
+            previous_hash,
+            event_hash,
+            sanitized_payload,
+            integrity_status,
+            created_at
+        FROM audit_chain
+        WHERE event_id = ?;
+        """,
+        (event_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("sanitized_payload"):
+        try:
+            d["sanitized_payload"] = json.loads(d["sanitized_payload"])
+        except Exception:
+            pass
+    return d
+

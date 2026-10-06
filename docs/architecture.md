@@ -445,10 +445,11 @@ The consensus confidence score is deterministically calculated and strictly boun
 | **Agent Coordinator** | **IMPLEMENTED (Day 7)** | `AgentCoordinator` orchestrating all 4 domain agents, idempotency caching, masked audit event emissions, and SQLite `decision_results` persistence. | Distributed distributed actor-model agent coordinator (Day 12). |
 | **Legacy System Simulator** | **IMPLEMENTED (Day 1)** | Deterministic `LegacyBankingSystem` simulating host approvals/rejections. | Full Shadow Deployment dual-run engine and discrepancy analysis (Day 9). |
 | **Investigation Queue** | **IMPLEMENTED (Day 5-7)** | Flagged via `requires_manual_review = True` on ambiguous reconciliation, high/critical fraud, policy triggers, or agent failures. | Operator review console, and case management (Day 11). |
-| **Security Layer** | **IMPLEMENTED (Day 1-7)** | Zero-trust masking (`mask_account_id`), log sanitization, safe normalization, immutable decision attributes. | Mutual TLS, cryptographic signing, API gateway policies (Day 8). |
-| **Privacy Layer** | **IMPLEMENTED (Day 1-7)** | Strict ban on raw PII / account numbers in logs, fuzzy evidence, and event payloads. | Differential privacy queries and cryptographic data tokenization (Day 8). |
-| **Database** | **IMPLEMENTED (Day 1-7)** | SQLite with indexed tables (`transactions`, `ledger_entries`, `reconciliation_results`, `fraud_analyses`, `decision_results`). | PostgreSQL / TimescaleDB support with high-throughput indexing (Day 8+). |
-| **REST APIs** | **IMPLEMENTED (Day 1-7)** | Validation, Streaming, Events, Reconciliation, Candidates, Fraud, and Decision APIs (`POST /decision/analyze`, `GET /decision/metrics`, `GET /decision/{id}`). | Full OpenAPI 3.1 gateway and gRPC endpoints (Day 14). |
+| **Security Layer** | **IMPLEMENTED (Day 1-8)** | Zero-Trust Security Gateway, input bounds, trust boundaries (stripping fake client decisions), safe error handling. | Mutual TLS, hardware key stores, external HSM integration (Day 14). |
+| **Privacy & PII Layer** | **IMPLEMENTED (Day 1-8)** | 3-tier PII classification, irreversible masking (`mask_*`), deterministic surrogate tokenization (`TokenVault`), recursive payload sanitization. | Differential privacy and encrypted fields at rest (Day 13). |
+| **Audit Integrity** | **IMPLEMENTED (Day 8)** | Tamper-evident SHA-256 hash-chain ledger, append-only SQLite `audit_chain`, mathematical integrity verification (`verify_chain`). | External Merkle timestamping and notary witness nodes (Day 14). |
+| **Database** | **IMPLEMENTED (Day 1-8)** | SQLite with indexed tables (`transactions`, `ledger_entries`, `reconciliation_results`, `fraud_analyses`, `decision_results`, `audit_chain`). | PostgreSQL / TimescaleDB support with high-throughput partitioning. |
+| **REST APIs** | **IMPLEMENTED (Day 1-8)** | Ingestion, Reconciliation, Candidates, Fraud, Consensus Decision, Security Metrics (`GET /security/metrics`), and Audit Verification (`GET /security/audit/verify`). | Full OpenAPI 3.1 gateway and gRPC endpoints (Day 14). |
 | **Dashboard** | **PLANNED** | Directory initialized (`dashboard/`). | Real-time operator triage console and reconciliation metrics UI (Day 11). |
 
 ---
@@ -456,15 +457,16 @@ The consensus confidence score is deterministically calculated and strictly boun
 ## 9. Data Flow & Zero-Trust Multi-Agent Boundary
 
 ### Implemented End-to-End Flow:
-1. **Transaction Submission:** A client submits a transaction to `POST /transactions` or `POST /transactions/simulate`.
-2. **Schema & Business Validation:** Pydantic `Transaction` validates fields, positive amounts, 3-letter currency codes, and non-empty IDs.
-3. **Zero-Trust Sanitization:** Account identifiers are masked via `mask_account_id()` prior to output to system logs and event audit records.
-4. **Local Event Dispatch:** The transaction is converted into an in-memory `Event` and routed via `EventOrchestrator` to registered handlers.
-5. **Reconciliation Agent:** Discovers candidate ledger entries via `CandidateService` + `FuzzyCandidateMatcher` and verifies via `ReconciliationEngine`. Emits `RECONCILIATION_AGENT_COMPLETED`.
-6. **Fraud Detection Agent:** Extracts 7 features, compares with account profile baseline, evaluates 7 independent fraud rules. Emits `FRAUD_AGENT_COMPLETED`.
-7. **Policy Agent:** Evaluates compliance rules, single transaction ceilings, and compound risk. Emits `POLICY_AGENT_COMPLETED`.
-8. **Consensus Engine:** Combines agent postures, resolves precedence (`BLOCK > REVIEW > APPROVE`), calculates agreement confidence, flags disagreements. Emits `CONSENSUS_DECISION_COMPLETED`.
-9. **Database Persistence:** Persists authoritative `DecisionResult` in SQLite `decision_results` table with audit trail.
+1. **Untrusted Request Ingestion:** Request arrives at `SecurityGateway` (verifies structural bounds, monetary limits, payload size <= 1MB, ISO currencies).
+2. **Trust Boundary Scrubbing:** Client-injected decisions (`decision`, `fraud_score`, `risk_level`, `confidence`) are stripped immediately.
+3. **Canonical Transaction Hashing:** `hash_transaction()` computes SHA-256 digest covering normalized banking fields and tokenized account surrogate.
+4. **Local Event Dispatch:** In-memory `Event` routed via `EventOrchestrator` with masked account IDs.
+5. **Reconciliation Agent:** Discovers candidate ledger entries via `CandidateService` and verifies via `ReconciliationEngine`.
+6. **Fraud Detection Agent:** Extracts 7 features, compares with account profile baseline, evaluates 7 independent fraud rules.
+7. **Policy Agent:** Evaluates compliance rules, single transaction ceilings, and compound risk.
+8. **Consensus Engine:** Combines agent postures, resolves precedence (`BLOCK > REVIEW > APPROVE`), calculates agreement confidence.
+9. **Decision Integrity Hash:** Canonical hash digest generated for the final consensus verdict.
+10. **Tamper-Evident Hash Chain:** `AuditIntegrityService` sanitizes payload, computes canonical payload hash, cryptographically links to previous block's digest, and appends to SQLite `audit_chain` ledger.
 
 ---
 
@@ -476,6 +478,104 @@ The consensus confidence score is deterministically calculated and strictly boun
 4. **Deterministic & Explainable Intelligence:** Zero LLM dependency; risk and consensus decisions are 100% reproducible, explainable, and auditable.
 5. **Centralized Precedence Arbitration:** Conflicting agent postures are resolved deterministically using `BLOCK_RECOMMENDED > MANUAL_REVIEW > APPROVE`.
 6. **Fail-Safe Invariant:** `Agent Failure != Approval` ensures unhandled downstream errors fall back to human compliance triage.
-7. **Data Hygiene First:** Logging never prints raw account numbers; zero-trust principles are applied across all stages.
+7. **Never Trust Client Decisions:** Client-supplied risk or disposition fields are stripped at trust boundaries; authoritative verdicts are recomputed server-side.
+8. **Append-Only Audit Immutability:** Audit records are append-only; no `UPDATE` or `DELETE` queries exist for audit history. Corrections are recorded as new events.
+
+---
+
+## 11. Day 8 Zero-Trust Security & Audit Integrity Specification
+
+### Architecture Diagram
+
+```text
+                    UNTRUSTED REQUEST
+                           │
+                           ▼
+                 ┌───────────────────┐
+                 │ Security Gateway  │
+                 └─────────┬─────────┘
+                           │
+                 ┌─────────┼─────────┐
+                 ▼         ▼         ▼
+              Validate    PII      Tokenize
+                         Protect
+                 │         │         │
+                 └─────────┼─────────┘
+                           ▼
+                    Business Logic
+                           │
+                           ▼
+                   Decision Engine
+                           │
+                           ▼
+                  Canonical Payload
+                           │
+                           ▼
+                     SHA-256 Hash
+                           │
+                           ▼
+                    Hash Chain Audit
+                           │
+                           ▼
+                    Integrity Check
+```
+
+### PII Classification Taxonomy
+
+| Level | Classification | Attributes | Handling & Storage Policy |
+| :--- | :--- | :--- | :--- |
+| **1** | **PUBLIC** | `transaction_id`, `amount`, `currency`, `transaction_type`, `timestamp`, `risk_level` | Visible in logs, telemetry, APIs, and audit blocks. |
+| **2** | **SENSITIVE** | `account_id`, `customer_id` | Masked in logs/events (`ACC-*****6789`). Surrogate tokenized for internal joins. |
+| **3** | **HIGHLY SENSITIVE** | `card_number`, `bank_account_number`, `government_id`, `phone_number`, `email` | Deeply masked (`************5678`, `c****@domain.com`). Never stored in cleartext. |
+
+### Technical Distinction: Masking vs Tokenization vs Hashing vs Encryption
+
+- **Visual Masking:** Irreversible redaction replacing middle/identifying characters with asterisks (e.g. `ACC-*****6789`). Used for logs, public API outputs, and audit events.
+- **Deterministic Tokenization:** Reversible surrogate identifiers (`tok_<hex16>`) generated via HMAC-SHA256 with vault isolation (`TokenVault`). Enables authorized internal correlation without exposing raw identifiers.
+- **Canonical Hashing:** One-way SHA-256 digest of key-order-independent, whitespace-stripped canonical JSON (`canonicalize_json`). Used for cryptographic proof of integrity and tamper detection.
+- **Encryption:** Reversible confidentiality ciphertext using symmetric or asymmetric secret keys. (Not conflated with tokenization).
+
+### Cryptographic Hash-Chain Ledger
+
+```text
+Genesis Previous Hash: 0000000000000000000000000000000000000000000000000000000000000000
+       │
+       ▼
+Block 1: [Seq: 1, Event: EVT-001, PayloadHash: P1, PrevHash: GENESIS, EventHash: H1]
+       │
+       ▼
+Block 2: [Seq: 2, Event: EVT-002, PayloadHash: P2, PrevHash: H1,      EventHash: H2]
+       │
+       ▼
+Block 3: [Seq: 3, Event: EVT-003, PayloadHash: P3, PrevHash: H2,      EventHash: H3]
+       │
+       ▼
+...
+```
+
+### Security Threat Matrix & Protection Verification
+
+| Threat | Protection Mechanism | Verification Test | Result |
+| :--- | :--- | :--- | :---: |
+| **PII Data Leakage** | Deep recursive masking (`sanitize_payload`), surrogate tokenization (`TokenVault`) | `test_sanitize_payload_deep_non_mutating`, `test_mask_*` | **PROTECTED** |
+| **Audit Payload Tampering** | Canonical payload hash verification against stored block | `test_attack_1_audit_payload_tampering` | **DETECTED** (`PAYLOAD_HASH_MISMATCH`) |
+| **Block Header Tampering** | Recomputed event hash verification (`compute_event_hash`) | `test_attack_2_event_hash_tampering` | **DETECTED** (`EVENT_HASH_MISMATCH`) |
+| **Previous Hash Alteration**| Sequential hash-link verification | `test_attack_3_previous_hash_tampering` | **DETECTED** (`PREVIOUS_HASH_MISMATCH`) |
+| **Audit Event Deletion** | Monotonic sequence continuity check | `test_attack_4_event_deletion` | **DETECTED** (`SEQUENCE_GAP`) |
+| **Event Reordering** | Previous hash linkage and monotonic sequence check | `test_attack_5_event_reordering` | **DETECTED** (`SEQUENCE_GAP` / `DUPLICATE`) |
+| **Fake Client Decision** | Trust boundary stripping of client-provided decision fields | `test_trust_boundary_strips_fake_decision` | **NEUTRALIZED** (Server Computed) |
+| **Fake Fraud Score Injection**| Trust boundary stripping of client-provided fraud score | `test_trust_boundary_strips_fake_fraud_score` | **NEUTRALIZED** (Server Computed) |
+| **Oversized Input Attack** | Security Gateway size limiter (`MAX_REQUEST_SIZE_BYTES = 1 MB`) | `test_gateway_oversized_payload` | **REJECTED** (`REQUEST_SIZE_EXCEEDED`) |
+| **SQL Injection / Malformed ID**| Regex structural validation (`^[a-zA-Z0-9_-]{3,64}$`) | `test_gateway_invalid_characters_transaction_id` | **REJECTED** (Validation Failure) |
+| **Sensitive Error Leakage** | Safe sanitized error responses; suppressed stack traces & paths | `test_api_no_raw_pii_leakage_in_error` | **PROTECTED** (Zero stack traces) |
+| **Transaction Mutation** | Transaction integrity hash (`hash_transaction`) | `test_hash_transaction_sensitivity` | **PROTECTED** (Hash mismatch on edit) |
+
+### Zero-Trust Security Failure Policy
+
+If cryptographic audit integrity verification fails or an audit chain exhibits tampering:
+- The system **NEVER** silently falls back to approval.
+- The system automatically triggers the safe state: `MANUAL_REVIEW`.
+- A high-priority security event `AUDIT_INTEGRITY_VERIFICATION_FAILED` is logged to the security event bus.
+- Operators are immediately alerted through the security verification telemetry endpoint (`GET /security/audit/verify`).
 
 
