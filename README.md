@@ -35,7 +35,7 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 
 ---
 
-## Current Status: Day 1 & Day 2 Completed
+## Current Status: Day 1, Day 2 & Day 3 Completed (63/63 Tests Passing)
 
 ### Day 1 — Foundation & Architecture
 - **Project Architecture & Layout:** Modular package structure with isolated agent directories, orchestrator, legacy simulator, and database layers.
@@ -50,14 +50,26 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 - **Synthetic Transaction Generation:** Deterministic, reproducible stream generator (`TransactionGenerator`) with seed support, multi-rail types (`TRANSFER`, `PAYMENT`, `CARD_PAYMENT`, `WITHDRAWAL`, `DEPOSIT`, `INTERNATIONAL_TRANSFER`), and controlled currencies (`USD`, `EUR`, `GBP`, `INR`).
 - **Local Event Streaming:** Decoupled `EventPublisher` abstract base class and `LocalEventPublisher` implementing in-memory event dispatching to `EventOrchestrator`.
 - **Kafka-Ready Architecture:** Designed for seamless drop-in replacement with `KafkaEventPublisher` in Days 3+ without modifying generator, service, or agent business logic.
-  > **Note: Kafka is not yet enabled.** Day 2 uses a local event publisher as the Kafka-compatible foundation without requiring Docker, Zookeeper, or external brokers.
 - **Transaction Ingestion Service:** `TransactionService` coordinating schema validation, idempotent SQLite persistence, canonical `TRANSACTION_RECEIVED` event creation, and publisher emission.
-- **REST Endpoints:**
-  - `POST /transactions`: Single transaction ingestion and event publishing.
-  - `POST /transactions/simulate`: Bounded synthetic stream simulation (1 to 1000 transactions).
-  - `GET /events/metrics`: Live event execution counters (`events_published`, `events_handled`, `unknown_events`).
-- **CLI Simulation Utility:** `scripts/run_transaction_stream.py` for terminal-based batch/stream transaction generation with zero-trust masked account outputs.
-- **Automated Test Suite:** 38/38 passing tests (18 Day 1 foundation tests + 20 Day 2 streaming tests).
+- **REST Endpoints:** `POST /transactions`, `POST /transactions/simulate`, `GET /events/metrics`.
+- **CLI Simulation Utility:** `scripts/run_transaction_stream.py` for terminal-based batch/stream transaction generation.
+
+### Day 3 — Event-Driven Orchestration & Processing Pipeline
+- **Centralized Event Types:** Strongly typed `EventType` enum in `orchestrator/event_types.py` defining canonical event transitions (`TRANSACTION_RECEIVED`, `TRANSACTION_VALIDATED`, `TRANSACTION_RECONCILIATION_REQUESTED`, `TRANSACTION_RECONCILED`, `FRAUD_ANALYSIS_REQUESTED`, `FRAUD_ANALYSIS_COMPLETED`, `RISK_ANALYSIS_REQUESTED`, `RISK_ANALYSIS_COMPLETED`, `TRANSACTION_APPROVED`, `TRANSACTION_FLAGGED`, `TRANSACTION_REJECTED`, `PROCESSING_FAILED`).
+- **Enhanced Event Envelope:** Domain `Event` model containing `event_id`, `event_type`, `correlation_id`, `causation_id`, `source`, `timestamp`, `retry_count`, and `payload`.
+- **Handler Interface & Dynamic Registry:** Extensible handler pattern (`BaseEventHandler`, `FunctionalEventHandler`) with `register_handler`, `unregister_handler`, multi-handler execution per event type, and support for both synchronous and asynchronous coroutines without blocking.
+- **Decoupled Processing Pipeline:** `ProcessingPipeline` in `orchestrator/processing_pipeline.py` chaining the banking event flow from ingestion through validation, reconciliation request, fraud analysis request, risk analysis request, to final disposition decision without hardcoding intelligence.
+- **Workflow State Tracking:** Thread-safe `WorkflowTracker` in `orchestrator/workflow_state.py` tracking end-to-end lifecycle per `correlation_id` across distinct stage states (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
+- **Event Idempotency:** Guaranteed deduplication tracking processed event IDs (`_processed_event_ids`); identical event replays are recorded as `DUPLICATE` without re-executing handlers.
+- **Bounded Retries & Failure Handling:** Automatic retry loop bounded by `MAX_EVENT_RETRIES` (default: 3). Exceptions are caught gracefully, sanitized to prevent sensitive data leakage, logged to the audit trail, and workflows marked as `FAILED` without crashing the application.
+- **Financial Event Audit Trail:** `EventAuditTrail` in `orchestrator/event_audit.py` maintaining in-memory chronological transition records with querying via `get_event_history(correlation_id)`.
+- **REST Endpoints Added:**
+  - `GET /workflows/{correlation_id}`: Query workflow state, active stage progression, and status.
+  - `GET /events/{correlation_id}`: Retrieve chronological audit history for a given correlation ID.
+  - `POST /events/process`: Manual domain event ingestion and orchestrator routing.
+  - Extended `GET /events/metrics`: Live metrics for `events_received`, `events_processed`, `events_failed`, `events_retried`, `events_duplicate`, `workflows_started`, `workflows_completed`, `workflows_failed`.
+- **Automated Test Suite:** 63/63 passing tests (18 Day 1 + 20 Day 2 + 25 Day 3).
+- **100-Transaction Benchmark:** 100 transactions processed in 0.23 seconds (3,944 events/sec) with 100% workflow completion, 0 failures, and 5 duplicates caught and ignored.
 
 ---
 
@@ -203,8 +215,91 @@ Events Handled: 20
 ---------------------------------
 ```
 
+```
+
 ---
 
+## Day 3 — Event-Driven Orchestration
+
+Day 3 introduces a production-style, decoupled event orchestration pipeline with correlation tracing, parent causation lineage, bounded retries, idempotent deduplication, and financial auditability.
+
+```text
+Transaction Ingestion (API / Generator)
+               │
+               ▼
+      TRANSACTION_RECEIVED ──[Validation Handler]──► Workflow State: PROCESSING
+               │
+               ▼
+      TRANSACTION_VALIDATED ──[Coordinator]
+         ┌─────┴────────────────┐
+         ▼                      ▼
+TRANSACTION_RECONCILIATION   FRAUD_ANALYSIS
+      _REQUESTED               _REQUESTED
+         │                      │
+         ▼                      ▼
+TRANSACTION_RECONCILED       FRAUD_ANALYSIS_COMPLETED
+                                │
+                                ▼
+                             RISK_ANALYSIS_REQUESTED
+                                │
+                                ▼
+                             RISK_ANALYSIS_COMPLETED
+                                │
+                                ▼
+                             TRANSACTION_APPROVED ──► Workflow State: COMPLETED
+```
+
+### Architecture Pillars
+
+1. **Centralized Event Types (`orchestrator/event_types.py`):**
+   - Canonical `EventType` enum guarantees zero magic strings across producers, orchestrators, and handlers:
+     - `TRANSACTION_RECEIVED`, `TRANSACTION_VALIDATED`, `TRANSACTION_RECONCILIATION_REQUESTED`, `TRANSACTION_RECONCILED`
+     - `FRAUD_ANALYSIS_REQUESTED`, `FRAUD_ANALYSIS_COMPLETED`, `RISK_ANALYSIS_REQUESTED`, `RISK_ANALYSIS_COMPLETED`
+     - `TRANSACTION_APPROVED`, `TRANSACTION_FLAGGED`, `TRANSACTION_REJECTED`, `PROCESSING_FAILED`
+
+2. **Event Envelope & Tracing Lineage (`orchestrator/event_orchestrator.py`):**
+   - **`correlation_id`:** Globally unique token tracking the entire lifecycle of a transaction across all stages and agents.
+   - **`causation_id`:** Pointer to the immediate parent `event_id` that triggered the current event, enabling distributed debugging and causality graphs.
+   - **`retry_count`:** Integer tracking invocation attempts per event.
+   - **`timestamp`:** UTC ISO timestamp of event creation.
+
+3. **Handler Registry & Extensibility (`orchestrator/handlers.py`):**
+   - Pluggable `BaseEventHandler` abstract interface and `FunctionalEventHandler` adapter.
+   - Multi-handler support: Multiple independent handlers can bind to the same event type.
+   - Non-blocking execution: Seamlessly supports both synchronous functions and asynchronous coroutines.
+   - Dynamic binding via `orchestrator.register_handler()` and `orchestrator.unregister_handler()`.
+
+4. **Workflow State Tracking (`orchestrator/workflow_state.py`):**
+   - Thread-safe `WorkflowTracker` maintains end-to-end lifecycle status (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
+   - Granular stage tracking: `validation`, `reconciliation`, `fraud_analysis`, `risk_analysis`, `final_decision`.
+   - Accessible via REST endpoint `GET /workflows/{correlation_id}`.
+
+5. **Financial Event Idempotency:**
+   - In-memory event deduplication (`_processed_event_ids`).
+   - Replay attacks or duplicate broker deliveries are trapped, marked as `DUPLICATE` in the audit log, and return immediately without executing handlers.
+
+6. **Bounded Retries & Graceful Failure Handling:**
+   - Configurable `MAX_EVENT_RETRIES` (default: 3).
+   - Failed handler executions trigger exponential/sequential bounded retries.
+   - Permanent failures transition the event to `FAILED`, record sanitized diagnostic messages in the audit trail, and transition the workflow to `FAILED` without crashing the service.
+
+7. **Financial Event Audit Trail (`orchestrator/event_audit.py`):**
+   - In-memory immutable `AuditRecord` journal logging every state transition (`RECEIVED`, `PROCESSING`, `COMPLETED`, `FAILED`, `DUPLICATE`).
+   - Inspectable via `GET /events/{correlation_id}`.
+
+### Day 3 API Endpoints
+
+- **`GET /workflows/{correlation_id}`:** Retrieve real-time workflow status and stage breakdown.
+- **`GET /events/{correlation_id}`:** Retrieve chronological audit log for a correlation ID.
+- **`POST /events/process`:** Manually inject a domain event into the orchestrator pipeline.
+- **`GET /events/metrics`:** Query live event and workflow counters (`events_received`, `events_processed`, `events_failed`, `events_retried`, `events_duplicate`, `workflows_started`, `workflows_completed`).
+
+### Running the 100-Transaction Benchmark
+```powershell
+python scripts/benchmark_day3.py
+```
+
+---
 
 ## Directory Structure
 
@@ -214,24 +309,27 @@ ZT-LedgerGuard/
 ├── agents/
 │   ├── __init__.py
 │   ├── reconciliation_agent/
-│   │   └── __init__.py
 │   ├── fraud_agent/
-│   │   └── __init__.py
 │   ├── risk_agent/
-│   │   └── __init__.py
 │   └── privacy_agent/
-│       └── __init__.py
 │
 ├── orchestrator/
 │   ├── __init__.py
-│   └── event_orchestrator.py
+│   ├── event_orchestrator.py       # Event bus, idempotency, bounded retries
+│   ├── event_types.py              # Canonical EventType enum
+│   ├── handlers.py                 # BaseEventHandler & placeholder handlers
+│   ├── workflow_state.py           # Thread-safe WorkflowTracker & stages
+│   ├── event_audit.py              # Immutable EventAuditTrail
+│   └── processing_pipeline.py      # End-to-end transaction coordinator
 │
 ├── kafka/
-│   └── __init__.py
+│   ├── __init__.py
+│   └── local_event_publisher.py    # LocalEventPublisher & create_transaction_event
 │
 ├── reconciliation/
 │   ├── __init__.py
-│   └── models.py
+│   ├── models.py                   # Transaction & LedgerEntry Pydantic models
+│   └── transaction_service.py      # TransactionService ingestion coordinator
 │
 ├── fraud_detection/
 │   ├── __init__.py
@@ -239,33 +337,30 @@ ZT-LedgerGuard/
 │
 ├── security/
 │   ├── __init__.py
-│   └── security_utils.py
+│   └── security_utils.py           # PII masking & zero-trust log sanitization
 │
 ├── legacy_simulation/
 │   ├── __init__.py
 │   └── legacy_system.py
 │
-├── shadow_deployment/
-│   └── __init__.py
-│
-├── dashboard/
-│   └── __init__.py
-│
 ├── database/
 │   ├── __init__.py
-│   └── database.py
+│   └── database.py                 # SQLite persistence & queries
 │
 ├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── sample/
+│   ├── __init__.py
+│   └── transaction_generator.py    # Deterministic synthetic transaction generator
 │
 ├── tests/
 │   ├── __init__.py
-│   └── test_foundation.py
+│   ├── test_foundation.py          # Day 1 test suite (18 tests)
+│   ├── test_day2.py                # Day 2 test suite (20 tests)
+│   └── test_day3.py                # Day 3 test suite (25 tests)
 │
 ├── scripts/
-│   └── __init__.py
+│   ├── __init__.py
+│   ├── run_transaction_stream.py   # Day 2 streaming CLI
+│   └── benchmark_day3.py           # Day 3 100-transaction benchmark
 │
 ├── docs/
 │   ├── architecture.md
@@ -275,7 +370,6 @@ ZT-LedgerGuard/
 ├── .gitignore
 ├── requirements.txt
 ├── README.md
-└── main.py
 ```
 
 ---

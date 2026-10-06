@@ -10,6 +10,7 @@ Day 1 Foundation:
 
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -23,6 +24,7 @@ from kafka.local_event_publisher import (
     EVENT_TYPE_TRANSACTION_RECEIVED,
     LocalEventPublisher,
 )
+from orchestrator.event_audit import EventAuditTrail
 from orchestrator.event_orchestrator import (
     Event,
     EventOrchestrator,
@@ -30,6 +32,8 @@ from orchestrator.event_orchestrator import (
     placeholder_reconciliation_handler,
     transaction_event_handler,
 )
+from orchestrator.processing_pipeline import ProcessingPipeline
+from orchestrator.workflow_state import WorkflowTracker
 from reconciliation.models import Transaction
 from reconciliation.transaction_service import TransactionService
 from security.security_utils import mask_account_id
@@ -48,10 +52,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-# 3. Global Orchestrator & Publisher Instances
-orchestrator = EventOrchestrator()
+# 3. Global Orchestrator, Tracker, Audit, and Pipeline Singletons
+workflow_tracker = WorkflowTracker()
+audit_trail = EventAuditTrail()
+orchestrator = EventOrchestrator(
+    workflow_tracker=workflow_tracker,
+    audit_trail=audit_trail,
+)
 publisher = LocalEventPublisher(orchestrator)
 transaction_service = TransactionService(publisher=publisher)
+pipeline = ProcessingPipeline(orchestrator=orchestrator, workflow_tracker=workflow_tracker)
 
 
 class SimulationRequest(BaseModel):
@@ -67,6 +77,17 @@ class SimulationRequest(BaseModel):
         default=None,
         description="Optional seed for deterministic reproducibility.",
     )
+
+
+class EventProcessRequest(BaseModel):
+    """Request model for manual event ingestion and processing."""
+
+    event_type: str
+    source: str = "API"
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    event_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    causation_id: Optional[str] = None
 
 
 @asynccontextmanager
@@ -92,8 +113,8 @@ async def lifespan(app: FastAPI):
 # 4. FastAPI Application Initialization
 app = FastAPI(
     title=APP_NAME,
-    version="0.2.0",
-    description="Zero-Trust AI Ledger Reconciliation & Real-Time Fraud Triage Platform (Day 2 Streaming Foundation)",
+    version="0.3.0",
+    description="Zero-Trust AI Ledger Reconciliation & Real-Time Fraud Triage Platform (Day 3 Orchestration Pipeline)",
     lifespan=lifespan,
 )
 
@@ -200,6 +221,29 @@ def simulate_transactions(request: SimulationRequest) -> Dict[str, Any]:
 
 
 @app.get(
+    "/workflows/{correlation_id}",
+    tags=["Workflows"],
+    summary="Get Workflow State",
+    status_code=status.HTTP_200_OK,
+)
+def get_workflow_state(correlation_id: str) -> Dict[str, Any]:
+    """Retrieve current execution state and stage breakdown for a correlation ID."""
+    workflow = workflow_tracker.get_workflow(correlation_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow not found for correlation_id: {correlation_id}",
+        )
+    return {
+        "correlation_id": workflow.correlation_id,
+        "status": workflow.status,
+        "stages": workflow.stages,
+        "error": workflow.error,
+        "updated_at": workflow.updated_at.isoformat(),
+    }
+
+
+@app.get(
     "/events/metrics",
     tags=["Metrics"],
     summary="Get Event Orchestration Metrics",
@@ -210,8 +254,50 @@ def get_event_metrics() -> Dict[str, int]:
     return orchestrator.get_metrics()
 
 
+@app.get(
+    "/events/{correlation_id}",
+    tags=["Audit"],
+    summary="Get Event Audit History",
+    status_code=status.HTTP_200_OK,
+)
+def get_workflow_event_history(correlation_id: str) -> Dict[str, Any]:
+    """Retrieve chronological audit trail of all events for a given correlation ID."""
+    history = audit_trail.get_event_history(correlation_id)
+    return {
+        "correlation_id": correlation_id,
+        "event_count": len(history),
+        "events": history,
+    }
+
+
+@app.post(
+    "/events/process",
+    tags=["Events"],
+    summary="Ingest and Route Event",
+    status_code=status.HTTP_200_OK,
+)
+def process_event_endpoint(request: EventProcessRequest) -> Dict[str, Any]:
+    """Accept an arbitrary domain event and dispatch through orchestrator pipeline."""
+    event = Event(
+        event_type=request.event_type,
+        source=request.source,
+        payload=request.payload,
+        event_id=request.event_id or str(uuid.uuid4()),
+        correlation_id=request.correlation_id or str(uuid.uuid4()),
+        causation_id=request.causation_id,
+    )
+    orchestrator.publish(event)
+    return {
+        "status": "processed",
+        "event_id": event.event_id,
+        "correlation_id": event.correlation_id,
+    }
+
+
+
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+
 

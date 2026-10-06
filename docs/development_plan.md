@@ -32,10 +32,19 @@ This roadmap outlines the iterative engineering milestones for **ZT-LedgerGuard 
 
 ---
 
-### DAY 3: Event-Driven Orchestration
-- Event bus expansion with asynchronous consumer workers.
-- Topic-based event routing, correlation ID propagation, and dead-letter queues (DLQ).
-- Resilient retry semantics and event replay mechanisms.
+### DAY 3: Event-Driven Orchestration & Processing Pipeline *(Completed)*
+- Canonical `EventType` enum in `orchestrator/event_types.py` defining standard financial event vocabulary.
+- Enhanced `Event` envelope supporting `correlation_id`, parent `causation_id`, and `retry_count`.
+- Extensible `BaseEventHandler` interface and dynamic handler registry (`register_handler`, `unregister_handler`, multi-handler).
+- Asynchronous-ready design seamlessly executing sync functions and async coroutines without blocking.
+- Decoupled `ProcessingPipeline` chaining validation, reconciliation, fraud analysis, risk analysis, and final decision stages.
+- Thread-safe `WorkflowTracker` in `orchestrator/workflow_state.py` tracking distributed stage state per correlation ID.
+- Event deduplication and idempotency preventing duplicate event execution (`_processed_event_ids`).
+- Bounded retry mechanism with configurable `MAX_EVENT_RETRIES` (default: 3) and graceful exception handling.
+- Financial `EventAuditTrail` recording chronological state transitions (`RECEIVED`, `PROCESSING`, `COMPLETED`, `FAILED`, `DUPLICATE`).
+- REST endpoints: `GET /workflows/{correlation_id}`, `GET /events/{correlation_id}`, `POST /events/process`, `GET /events/metrics`.
+- 100% test pass rate with 63 total tests (18 Day 1 + 20 Day 2 + 25 Day 3).
+- 100-transaction performance benchmark (905 events, 0 failures, 5 duplicates caught, 3,944 events/sec).
 
 ---
 

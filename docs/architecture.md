@@ -69,24 +69,89 @@
 
 ---
 
-## 3. Component Status Matrix (Day 1 & Day 2 vs. Planned)
+## 3. Day 3 Event-Driven Orchestration Architecture
 
-| Component | Status | Day 1-2 Implementation Scope | Planned Full Scope (Days 3–15) |
+Day 3 introduces autonomous handler routing, distributed correlation tracking, parent causation lineage, bounded retries, event deduplication, workflow state machines, and immutable audit logs.
+
+```text
+                     Event Orchestrator
+                            |
+              +-------------+-------------+
+              |             |             |
+              v             v             v
+          Handler A     Handler B     Handler C
+              |             |             |
+              +-------------+-------------+
+                            |
+                     Workflow State
+                            |
+                     Event Audit Trail
+```
+
+### Canonical Event Model Specification
+
+```text
+Event
+ ├── event_id          (UUID v4 unique message identifier)
+ ├── event_type        (Strongly typed EventType enum token)
+ ├── correlation_id    (End-to-end transaction lifecycle identifier)
+ ├── causation_id      (Parent event_id that triggered this event)
+ ├── timestamp         (UTC ISO timestamp of event emission)
+ ├── retry_count       (Bounded retry counter, 0..MAX_EVENT_RETRIES)
+ └── payload           (Sanitized domain dictionary payload)
+```
+
+### Event Lifecycle & Pipeline Flow
+
+```text
+Transaction Ingestion (API / Generator)
+               │
+               ▼
+      TRANSACTION_RECEIVED ──► [ValidationHandler] ──► Workflow: PROCESSING
+               │
+               ▼
+      TRANSACTION_VALIDATED ──► [Pipeline Coordinator]
+         ┌─────┴────────────────┐
+         ▼                      ▼
+TRANSACTION_RECONCILIATION   FRAUD_ANALYSIS
+      _REQUESTED               _REQUESTED
+         │                      │
+         ▼                      ▼
+TRANSACTION_RECONCILED       FRAUD_ANALYSIS_COMPLETED
+                                │
+                                ▼
+                             RISK_ANALYSIS_REQUESTED
+                                │
+                                ▼
+                             RISK_ANALYSIS_COMPLETED
+                                │
+                                ▼
+                             TRANSACTION_APPROVED ──► Workflow: COMPLETED
+```
+
+---
+
+## 4. Component Status Matrix (Day 1, 2, 3 vs. Planned)
+
+| Component | Status | Day 1–3 Implementation Scope | Planned Full Scope (Days 4–15) |
 | :--- | :--- | :--- | :--- |
 | **Transaction Sources** | **IMPLEMENTED (Day 2)** | Deterministic synthetic generator `TransactionGenerator` with multi-channel and multi-currency simulation. | Continuous streaming load injector with anomaly burst modes. |
 | **Event Ingestion Layer** | **IMPLEMENTED (Day 2)** | `TransactionService` coordinating validation, SQLite persistence, and decoupled event publishing via `POST /transactions` and `POST /transactions/simulate`. | Distributed streaming ingestion gateways with TLS token authentication. |
 | **Event Publisher** | **IMPLEMENTED (Day 2)** | `EventPublisher` ABC with concrete `LocalEventPublisher` routing to `EventOrchestrator`. | `KafkaEventPublisher` implementing the same `EventPublisher` interface with zero code refactoring needed. |
-| **Event Orchestrator** | **IMPLEMENTED (Day 1-2)** | In-memory `EventOrchestrator` with typed event registration, execution metrics (`events_published`, `events_handled`). | Distributed Apache Kafka topics, consumer groups, partition management, DLQs. |
+| **Event Orchestrator** | **IMPLEMENTED (Day 3)** | Decoupled event bus with dynamic handler registry (`register_handler`, `unregister_handler`), idempotency deduplication (`_processed_event_ids`), bounded retries (`MAX_EVENT_RETRIES`), sync/async non-blocking handler support, and full audit trail. | Distributed Apache Kafka topics, consumer groups, partition management, DLQs. |
+| **Workflow State Tracker** | **IMPLEMENTED (Day 3)** | Thread-safe `WorkflowTracker` tracking status (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`) and stage breakdowns (`validation`, `reconciliation`, `fraud_analysis`, `risk_analysis`, `final_decision`). | Persistent Redis / distributed state cache with timeout monitors. |
+| **Event Audit Trail** | **IMPLEMENTED (Day 3)** | Thread-safe `EventAuditTrail` capturing immutable records with statuses (`RECEIVED`, `PROCESSING`, `COMPLETED`, `FAILED`, `DUPLICATE`) and causation lineage. | Append-only cryptographically signed ledger audit log (Day 8). |
+| **Processing Pipeline** | **IMPLEMENTED (Day 3)** | `ProcessingPipeline` chaining canonical banking event stages with placeholder execution results. | Full multi-agent evaluation pipeline with AI scoring and consensus. |
 | **Reconciliation Agent** | **PLANNED** | Placeholder acknowledgment handler and validated `LedgerEntry` model. | Deterministic matching (Day 4) and fuzzy reconciliation algorithms (Day 5). |
 | **Fraud Agent** | **PLANNED** | Placeholder handler and schema foundation in `fraud_detection/models.py`. | Real-time feature extraction, velocity checking, ML anomaly scoring (Day 6). |
 | **Risk Agent** | **PLANNED** | Directory initialized (`agents/risk_agent`). | Multi-agent risk profiling & aggregate score weighting (Day 7). |
-| **Decision Engine** | **PLANNED** | Direct API response contract. | Multi-agent consensus engine and automated disposition logic (Day 7). |
+| **Decision Engine** | **PLANNED** | Placeholder disposition handler (`TRANSACTION_APPROVED`). | Multi-agent consensus engine and automated disposition logic (Day 7). |
 | **Legacy System Simulator** | **IMPLEMENTED (Day 1)** | Deterministic `LegacyBankingSystem` simulating host approvals/rejections. | Full Shadow Deployment dual-run engine and discrepancy analysis (Day 9). |
 | **Investigation Queue** | **PLANNED** | Not implemented today. | Alert queuing, operator review hooks, and case management (Day 11). |
 | **Security Layer** | **IMPLEMENTED (Day 1)** | Account ID masking (`mask_account_id`), log sanitization, zero-trust log hygiene. | Mutual TLS, cryptographic signing, API gateway policies (Day 8). |
 | **Privacy Layer** | **PLANNED** | Zero-trust logging rule: strict ban on raw PII / account numbers in logs. | Differential privacy queries and cryptographic data tokenization (Day 8). |
 | **Database** | **IMPLEMENTED (Day 1-2)** | Local SQLite engine with idempotent schemas and sequence auto-detection for transactions & ledger records. | PostgreSQL / TimescaleDB support with high-throughput indexing (Day 8+). |
-| **Monitoring & Telemetry** | **IMPLEMENTED (Day 2)** | Structured logging + live `EventOrchestrator` execution metrics (`GET /events/metrics`). | Distributed OpenTelemetry tracing and Prometheus metric exporters (Day 12). |
+| **Monitoring & Telemetry** | **IMPLEMENTED (Day 3)** | Structured logging + extended live `EventOrchestrator` execution metrics (`GET /events/metrics`) and audit traces (`GET /events/{correlation_id}`). | Distributed OpenTelemetry tracing and Prometheus metric exporters (Day 12). |
 | **Dashboard** | **PLANNED** | Directory initialized (`dashboard/`). | Real-time operator triage console and reconciliation metrics UI (Day 11). |
 
 
