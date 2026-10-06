@@ -1,0 +1,160 @@
+"""Database Foundation for ZT-LedgerGuard.
+
+Provides lightweight SQLite connection handling, schema creation, and parameterized queries.
+Designed for local execution on Windows without Docker or external DB services.
+PostgreSQL/TimescaleDB connectors will build upon this contract in later phases.
+"""
+
+import os
+import sqlite3
+from typing import Any, Dict, List, Optional
+from reconciliation.models import LedgerEntry, Transaction
+
+
+def parse_db_path(database_url: Optional[str] = None) -> str:
+    """Extract SQLite filesystem path from DATABASE_URL or environment variable."""
+    url = database_url or os.getenv("DATABASE_URL", "sqlite:///zt_ledgerguard.db")
+    if url.startswith("sqlite:///"):
+        return url.replace("sqlite:///", "")
+    return url
+
+
+def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
+    """Create a new SQLite database connection with row factory enabled.
+
+    Args:
+        db_path: Explicit file path or :memory:. If None, resolved from config.
+
+    Returns:
+        sqlite3.Connection configured with sqlite3.Row.
+    """
+    resolved_path = parse_db_path(db_path) if db_path is not None else parse_db_path()
+    conn = sqlite3.connect(resolved_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+
+def init_db(db_path: Optional[str] = None) -> None:
+    """Initialize database tables for transactions and ledger entries.
+
+    Idempotent schema initialization using IF NOT EXISTS.
+    """
+    resolved_path = parse_db_path(db_path) if db_path is not None else parse_db_path()
+    with sqlite3.connect(resolved_path) as conn:
+        cursor = conn.cursor()
+
+        # Transactions table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transactions (
+                transaction_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                transaction_type TEXT NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                transaction_timestamp TEXT NOT NULL,
+                source_system TEXT NOT NULL,
+                destination_system TEXT NOT NULL,
+                reference_id TEXT,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+
+        # Ledger entries table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ledger_entries (
+                ledger_entry_id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                debit_credit TEXT NOT NULL,
+                reference_id TEXT,
+                timestamp TEXT NOT NULL,
+                source_system TEXT NOT NULL,
+                FOREIGN KEY (transaction_id) REFERENCES transactions (transaction_id)
+            );
+            """
+        )
+
+        # Performance indexes for reconciliation & auditing
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_transactions_account_id
+            ON transactions(account_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ledger_transaction_id
+            ON ledger_entries(transaction_id);
+            """
+        )
+        conn.commit()
+
+
+def insert_transaction(conn: sqlite3.Connection, transaction: Transaction) -> None:
+    """Insert a validated transaction record using safe parameterized query."""
+    query = """
+        INSERT INTO transactions (
+            transaction_id, account_id, transaction_type, amount, currency,
+            transaction_timestamp, source_system, destination_system,
+            reference_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        transaction.transaction_id,
+        transaction.account_id,
+        transaction.transaction_type,
+        transaction.amount,
+        transaction.currency,
+        transaction.transaction_timestamp.isoformat(),
+        transaction.source_system,
+        transaction.destination_system,
+        transaction.reference_id,
+        transaction.created_at.isoformat(),
+    )
+    with conn:
+        conn.execute(query, params)
+
+
+def get_transaction_by_id(conn: sqlite3.Connection, transaction_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a transaction record by its unique ID."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM transactions WHERE transaction_id = ?", (transaction_id,))
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def insert_ledger_entry(conn: sqlite3.Connection, entry: LedgerEntry) -> None:
+    """Insert a validated ledger entry record using safe parameterized query."""
+    query = """
+        INSERT INTO ledger_entries (
+            ledger_entry_id, transaction_id, account_id, amount, currency,
+            debit_credit, reference_id, timestamp, source_system
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        entry.ledger_entry_id,
+        entry.transaction_id,
+        entry.account_id,
+        entry.amount,
+        entry.currency,
+        entry.debit_credit,
+        entry.reference_id,
+        entry.timestamp.isoformat(),
+        entry.source_system,
+    )
+    with conn:
+        conn.execute(query, params)
+
+
+def get_ledger_entries_by_transaction_id(conn: sqlite3.Connection, transaction_id: str) -> List[Dict[str, Any]]:
+    """Retrieve all ledger entries associated with a transaction ID."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ledger_entries WHERE transaction_id = ?", (transaction_id,))
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]

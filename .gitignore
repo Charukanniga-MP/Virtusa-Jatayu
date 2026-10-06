@@ -1,0 +1,49 @@
+# Python virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Environment variables & secrets
+.env
+*.env
+!.env.example
+*.pem
+*.key
+*.cert
+*.p12
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite and local databases
+*.db
+*.sqlite
+*.sqlite3
+zt_ledgerguard.db
+test_*.db
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# IDE and OS files
+.idea/
+.vscode/
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Temporary files
+scratch/
+tmp/
+*.tmp
