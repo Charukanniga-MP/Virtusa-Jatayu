@@ -34,7 +34,10 @@ from orchestrator.event_orchestrator import (
 )
 from orchestrator.processing_pipeline import ProcessingPipeline
 from orchestrator.workflow_state import WorkflowTracker
+from reconciliation.engine import ReconciliationEngine
+from reconciliation.ledger_repository import LedgerRepository
 from reconciliation.models import Transaction
+from reconciliation.reconciliation_service import ReconciliationService
 from reconciliation.transaction_service import TransactionService
 from security.security_utils import mask_account_id
 
@@ -52,7 +55,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-# 3. Global Orchestrator, Tracker, Audit, and Pipeline Singletons
+# 3. Global Orchestrator, Tracker, Audit, Reconciliation, and Pipeline Singletons
 workflow_tracker = WorkflowTracker()
 audit_trail = EventAuditTrail()
 orchestrator = EventOrchestrator(
@@ -61,7 +64,19 @@ orchestrator = EventOrchestrator(
 )
 publisher = LocalEventPublisher(orchestrator)
 transaction_service = TransactionService(publisher=publisher)
-pipeline = ProcessingPipeline(orchestrator=orchestrator, workflow_tracker=workflow_tracker)
+ledger_repository = LedgerRepository()
+reconciliation_engine = ReconciliationEngine()
+reconciliation_service = ReconciliationService(
+    repository=ledger_repository,
+    engine=reconciliation_engine,
+    publisher=publisher,
+    workflow_tracker=workflow_tracker,
+)
+pipeline = ProcessingPipeline(
+    orchestrator=orchestrator,
+    workflow_tracker=workflow_tracker,
+    reconciliation_service=reconciliation_service,
+)
 
 
 class SimulationRequest(BaseModel):
@@ -88,6 +103,12 @@ class EventProcessRequest(BaseModel):
     event_id: Optional[str] = None
     correlation_id: Optional[str] = None
     causation_id: Optional[str] = None
+
+
+class ReconciliationRunRequest(BaseModel):
+    """Request model for invoking ledger reconciliation on a transaction."""
+
+    transaction_id: str = Field(..., description="Target transaction ID to reconcile against the ledger")
 
 
 @asynccontextmanager
@@ -293,6 +314,50 @@ def process_event_endpoint(request: EventProcessRequest) -> Dict[str, Any]:
         "correlation_id": event.correlation_id,
     }
 
+
+@app.post(
+    "/reconciliation/run",
+    tags=["Reconciliation"],
+    summary="Run Deterministic Ledger Reconciliation",
+    status_code=status.HTTP_200_OK,
+)
+def run_reconciliation_endpoint(request: ReconciliationRunRequest) -> Dict[str, Any]:
+    """Execute deterministic ledger reconciliation for a transaction."""
+    result = reconciliation_service.reconcile_by_transaction_id(request.transaction_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction '{request.transaction_id}' not found.",
+        )
+    return result.model_dump()
+
+
+@app.get(
+    "/reconciliation/metrics",
+    tags=["Reconciliation"],
+    summary="Get Ledger Reconciliation Metrics",
+    status_code=status.HTTP_200_OK,
+)
+def get_reconciliation_metrics_endpoint() -> Dict[str, Any]:
+    """Retrieve aggregate reconciliation statistics."""
+    return reconciliation_service.get_metrics()
+
+
+@app.get(
+    "/reconciliation/{reconciliation_id}",
+    tags=["Reconciliation"],
+    summary="Get Reconciliation Result",
+    status_code=status.HTTP_200_OK,
+)
+def get_reconciliation_result_endpoint(reconciliation_id: str) -> Dict[str, Any]:
+    """Retrieve explainable reconciliation result and evidence by reconciliation ID."""
+    result = ledger_repository.get_reconciliation_result(reconciliation_id)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Reconciliation result '{reconciliation_id}' not found.",
+        )
+    return result.model_dump()
 
 
 if __name__ == "__main__":

@@ -38,9 +38,11 @@ class ProcessingPipeline:
         self,
         orchestrator: EventOrchestrator,
         workflow_tracker: Optional[WorkflowTracker] = None,
+        reconciliation_service: Optional[Any] = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.tracker = workflow_tracker or WorkflowTracker()
+        self.reconciliation_service = reconciliation_service
         self._register_pipeline_handlers()
 
     def _register_pipeline_handlers(self) -> None:
@@ -90,6 +92,9 @@ class ProcessingPipeline:
 
         # 3. TRANSACTION_RECONCILIATION_REQUESTED -> Reconciled
         def on_reconciliation_requested(event: Event) -> Dict[str, Any]:
+            if self.reconciliation_service:
+                return self.reconciliation_service.on_reconciliation_requested(event)
+
             self.tracker.update_stage(event.correlation_id, "reconciliation", StageStatus.COMPLETED.value)
             reconciled_event = Event(
                 event_type=EventType.TRANSACTION_RECONCILED.value,

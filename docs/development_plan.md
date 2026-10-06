@@ -48,10 +48,20 @@ This roadmap outlines the iterative engineering milestones for **ZT-LedgerGuard 
 
 ---
 
-### DAY 4: Ledger Reconciliation Engine
-- Deterministic double-entry ledger reconciliation (exact match pipeline).
-- Balance invariant validation, delta detection, and timing discrepancy tracking.
-- Exception classification: Missing Ledger, Amount Discrepancy, Duplicate Entry.
+### DAY 4: Ledger Reconciliation Engine *(Completed)*
+- Deterministic, explainable financial reconciliation engine comparing banking transactions with core ledger entries (zero LLM / zero ML).
+- Seven deterministic evaluation rules: Transaction ID, Reference ID, Account ID, Decimal Amount, ISO 4217 Currency, Timestamp Tolerance (300s window), and Debit/Credit Direction.
+- Strict Python `Decimal` money comparisons with banker's rounding to eliminate floating-point arithmetic errors.
+- Weighted scoring system with normalized score between 0.0 and 1.0 (ID/Reference: 30%, Account: 20%, Amount: 25%, Currency: 10%, Timestamp: 10%, Direction: 5%).
+- Controlled status classifications: `MATCHED`, `PARTIAL_MATCH`, `MISMATCHED`, and `NOT_FOUND`.
+- Explainable evidence generation attaching human-readable verification records and exact variance messages.
+- Decoupled `LedgerRepository` abstraction with SQLite persistence for ledger entries and reconciliation results.
+- `LedgerGenerator` synthetic data generator producing deterministic exact, partial, mismatched, and missing scenarios.
+- Event pipeline integration: `ReconciliationService` listening for `TRANSACTION_RECONCILIATION_REQUESTED` and emitting `TRANSACTION_RECONCILED` with correlation and causation tracking.
+- Workflow stage state tracking updating `reconciliation` stage from `IN_PROGRESS` to `COMPLETED` / `FAILED`.
+- REST endpoints: `POST /reconciliation/run`, `GET /reconciliation/{reconciliation_id}`, and `GET /reconciliation/metrics`.
+- 100% test pass rate with 98 total tests (18 Day 1 + 20 Day 2 + 25 Day 3 + 35 Day 4).
+- 1,000-record benchmark completed at ~4,800 records/sec throughput.
 
 ---
 

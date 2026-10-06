@@ -5,10 +5,14 @@ Designed for local execution on Windows without Docker or external DB services.
 PostgreSQL/TimescaleDB connectors will build upon this contract in later phases.
 """
 
+from __future__ import annotations
+
 import os
 import sqlite3
-from typing import Any, Dict, List, Optional
-from reconciliation.models import LedgerEntry, Transaction
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from reconciliation.models import LedgerEntry, Transaction
 
 
 def parse_db_path(database_url: Optional[str] = None) -> str:
@@ -31,12 +35,11 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     resolved_path = parse_db_path(db_path) if db_path is not None else parse_db_path()
     conn = sqlite3.connect(resolved_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
 def init_db(db_path: Optional[str] = None) -> None:
-    """Initialize database tables for transactions and ledger entries.
+    """Initialize database tables for transactions, ledger entries, and reconciliation results.
 
     Idempotent schema initialization using IF NOT EXISTS.
     """
@@ -62,7 +65,7 @@ def init_db(db_path: Optional[str] = None) -> None:
             """
         )
 
-        # Ledger entries table
+        # Ledger entries table (decoupled from transactions table to support async external feeds)
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS ledger_entries (
@@ -74,8 +77,26 @@ def init_db(db_path: Optional[str] = None) -> None:
                 debit_credit TEXT NOT NULL,
                 reference_id TEXT,
                 timestamp TEXT NOT NULL,
-                source_system TEXT NOT NULL,
-                FOREIGN KEY (transaction_id) REFERENCES transactions (transaction_id)
+                source_system TEXT NOT NULL
+            );
+            """
+        )
+
+        # Reconciliation results table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reconciliation_results (
+                reconciliation_id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL,
+                ledger_entry_id TEXT,
+                correlation_id TEXT,
+                status TEXT NOT NULL,
+                score REAL NOT NULL,
+                matched_fields TEXT NOT NULL,
+                mismatched_fields TEXT NOT NULL,
+                mismatch_reasons TEXT NOT NULL,
+                evidence TEXT,
+                timestamp TEXT NOT NULL
             );
             """
         )
@@ -91,6 +112,24 @@ def init_db(db_path: Optional[str] = None) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_ledger_transaction_id
             ON ledger_entries(transaction_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ledger_reference_id
+            ON ledger_entries(reference_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recon_transaction_id
+            ON reconciliation_results(transaction_id);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recon_correlation_id
+            ON reconciliation_results(correlation_id);
             """
         )
         conn.commit()
@@ -196,5 +235,63 @@ def get_max_transaction_counter(db_path: Optional[str] = None) -> int:
             return max_val
     except Exception:
         return 0
+
+
+def get_ledger_entry_by_id(conn: sqlite3.Connection, ledger_entry_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a single ledger entry by its unique ID."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ledger_entries WHERE ledger_entry_id = ?", (ledger_entry_id,))
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_ledger_entries_by_reference_id(conn: sqlite3.Connection, reference_id: str) -> List[Dict[str, Any]]:
+    """Retrieve all ledger entries matching an external reference ID."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ledger_entries WHERE reference_id = ?", (reference_id,))
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_reconciliation_result(conn: sqlite3.Connection, result_data: Dict[str, Any]) -> None:
+    """Insert or replace a reconciliation result record."""
+    query = """
+        INSERT OR REPLACE INTO reconciliation_results (
+            reconciliation_id, transaction_id, ledger_entry_id, correlation_id,
+            status, score, matched_fields, mismatched_fields, mismatch_reasons,
+            evidence, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        result_data["reconciliation_id"],
+        result_data["transaction_id"],
+        result_data.get("ledger_entry_id"),
+        result_data.get("correlation_id"),
+        result_data["status"],
+        result_data["score"],
+        result_data["matched_fields"],
+        result_data["mismatched_fields"],
+        result_data["mismatch_reasons"],
+        result_data.get("evidence"),
+        result_data["timestamp"],
+    )
+    with conn:
+        conn.execute(query, params)
+
+
+def get_reconciliation_result_by_id(conn: sqlite3.Connection, reconciliation_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a reconciliation result by its unique ID."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM reconciliation_results WHERE reconciliation_id = ?", (reconciliation_id,))
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_all_reconciliation_results(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Retrieve all reconciliation results for audit and metric computation."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM reconciliation_results ORDER BY timestamp DESC")
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]
 
 

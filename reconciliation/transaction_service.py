@@ -9,18 +9,18 @@ Coordinates:
 Decoupled by design: contains no fraud scoring or reconciliation business logic.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
 from pydantic import ValidationError
 
 from database.database import save_transaction
-from kafka.local_event_publisher import (
-    EventPublisher,
-    LocalEventPublisher,
-    create_transaction_event,
-)
 from reconciliation.models import Transaction
 from security.security_utils import mask_account_id
+
+if TYPE_CHECKING:
+    from kafka.local_event_publisher import EventPublisher
 
 logger = logging.getLogger("reconciliation.transaction_service")
 
@@ -39,7 +39,11 @@ class TransactionService:
             publisher: EventPublisher abstraction (defaults to LocalEventPublisher).
             db_path: Optional custom SQLite database target path (e.g., for tests).
         """
-        self.publisher = publisher or LocalEventPublisher()
+        if publisher is None:
+            from kafka.local_event_publisher import LocalEventPublisher
+            self.publisher = LocalEventPublisher()
+        else:
+            self.publisher = publisher
         self.db_path = db_path
 
     def process_transaction(
@@ -79,6 +83,8 @@ class TransactionService:
         save_transaction(tx_obj, db_path=self.db_path)
 
         # 3. Canonical Event Creation
+        from kafka.local_event_publisher import create_transaction_event
+
         event = create_transaction_event(
             transaction=tx_obj,
             source="transaction_service",

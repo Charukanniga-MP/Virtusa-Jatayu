@@ -35,7 +35,7 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 
 ---
 
-## Current Status: Day 1, Day 2 & Day 3 Completed (63/63 Tests Passing)
+## Current Status: Day 1, Day 2, Day 3 & Day 4 Completed (98/98 Tests Passing)
 
 ### Day 1 — Foundation & Architecture
 - **Project Architecture & Layout:** Modular package structure with isolated agent directories, orchestrator, legacy simulator, and database layers.
@@ -55,21 +55,29 @@ Modern enterprise banking and payment infrastructures face fundamental operation
 - **CLI Simulation Utility:** `scripts/run_transaction_stream.py` for terminal-based batch/stream transaction generation.
 
 ### Day 3 — Event-Driven Orchestration & Processing Pipeline
-- **Centralized Event Types:** Strongly typed `EventType` enum in `orchestrator/event_types.py` defining canonical event transitions (`TRANSACTION_RECEIVED`, `TRANSACTION_VALIDATED`, `TRANSACTION_RECONCILIATION_REQUESTED`, `TRANSACTION_RECONCILED`, `FRAUD_ANALYSIS_REQUESTED`, `FRAUD_ANALYSIS_COMPLETED`, `RISK_ANALYSIS_REQUESTED`, `RISK_ANALYSIS_COMPLETED`, `TRANSACTION_APPROVED`, `TRANSACTION_FLAGGED`, `TRANSACTION_REJECTED`, `PROCESSING_FAILED`).
+- **Centralized Event Types:** Strongly typed `EventType` enum in `orchestrator/event_types.py` defining canonical event transitions.
 - **Enhanced Event Envelope:** Domain `Event` model containing `event_id`, `event_type`, `correlation_id`, `causation_id`, `source`, `timestamp`, `retry_count`, and `payload`.
-- **Handler Interface & Dynamic Registry:** Extensible handler pattern (`BaseEventHandler`, `FunctionalEventHandler`) with `register_handler`, `unregister_handler`, multi-handler execution per event type, and support for both synchronous and asynchronous coroutines without blocking.
+- **Handler Interface & Dynamic Registry:** Extensible handler pattern (`BaseEventHandler`, `FunctionalEventHandler`) with non-blocking async execution.
 - **Decoupled Processing Pipeline:** `ProcessingPipeline` in `orchestrator/processing_pipeline.py` chaining the banking event flow from ingestion through validation, reconciliation request, fraud analysis request, risk analysis request, to final disposition decision without hardcoding intelligence.
 - **Workflow State Tracking:** Thread-safe `WorkflowTracker` in `orchestrator/workflow_state.py` tracking end-to-end lifecycle per `correlation_id` across distinct stage states (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
-- **Event Idempotency:** Guaranteed deduplication tracking processed event IDs (`_processed_event_ids`); identical event replays are recorded as `DUPLICATE` without re-executing handlers.
-- **Bounded Retries & Failure Handling:** Automatic retry loop bounded by `MAX_EVENT_RETRIES` (default: 3). Exceptions are caught gracefully, sanitized to prevent sensitive data leakage, logged to the audit trail, and workflows marked as `FAILED` without crashing the application.
+- **Event Idempotency & Bounded Retries:** Guaranteed deduplication tracking processed event IDs (`_processed_event_ids`) and bounded retry handling.
 - **Financial Event Audit Trail:** `EventAuditTrail` in `orchestrator/event_audit.py` maintaining in-memory chronological transition records with querying via `get_event_history(correlation_id)`.
+
+### Day 4 — Intelligent Ledger Reconciliation Engine
+- **Deterministic & Explainable Financial Matching:** Zero LLM, zero ML heuristic reconciliation engine (`reconciliation/engine.py` and `reconciliation/rules.py`) comparing incoming transactions with core ledger entries.
+- **7 Deterministic Rules:** Transaction ID, Reference ID, Account ID, Amount (`Decimal`), Currency (ISO 4217), Timestamp Tolerance (default 300s), and Logical Debit/Credit Direction.
+- **Weighted Match Scoring:** Configurable scoring weights totaling 100% (ID/Reference: 30%, Account: 20%, Amount: 25%, Currency: 10%, Timestamp: 10%, Direction: 5%) outputting normalized score between `0.0` and `1.0`.
+- **Controlled Status Classification:** Discrete statuses (`MATCHED`, `PARTIAL_MATCH`, `MISMATCHED`, `NOT_FOUND`).
+- **Strict Decimal Money Comparison:** Eliminated floating-point IEEE-754 drift using Python `Decimal` with banker's rounding for currency comparisons.
+- **Explainable Evidence Generation:** Every rule produces transparent human-auditable evidence dictionaries stating compared values, status, and exact delta (e.g. amount variance or timestamp delta).
+- **Decoupled Repository & Generator:** `LedgerRepository` abstraction managing SQLite persistence for general ledger entries and reconciliation records. `LedgerGenerator` producing synthetic, deterministic ledger entries across exact, partial, mismatched, and missing scenarios.
+- **End-to-End Event Integration:** Automated handler responding to `TRANSACTION_RECONCILIATION_REQUESTED` and emitting `TRANSACTION_RECONCILED` with correlation and causation tracking.
 - **REST Endpoints Added:**
-  - `GET /workflows/{correlation_id}`: Query workflow state, active stage progression, and status.
-  - `GET /events/{correlation_id}`: Retrieve chronological audit history for a given correlation ID.
-  - `POST /events/process`: Manual domain event ingestion and orchestrator routing.
-  - Extended `GET /events/metrics`: Live metrics for `events_received`, `events_processed`, `events_failed`, `events_retried`, `events_duplicate`, `workflows_started`, `workflows_completed`, `workflows_failed`.
-- **Automated Test Suite:** 63/63 passing tests (18 Day 1 + 20 Day 2 + 25 Day 3).
-- **100-Transaction Benchmark:** 100 transactions processed in 0.23 seconds (3,944 events/sec) with 100% workflow completion, 0 failures, and 5 duplicates caught and ignored.
+  - `POST /reconciliation/run`: Manually trigger reconciliation for a transaction.
+  - `GET /reconciliation/{reconciliation_id}`: Retrieve full reconciliation result and explainable evidence.
+  - `GET /reconciliation/metrics`: Real-time aggregated reconciliation counts (`total`, `matched`, `partial_match`, `mismatched`, `not_found`, `average_score`).
+- **Automated Test Suite:** 98/98 passing tests (18 Day 1 + 20 Day 2 + 25 Day 3 + 35 Day 4).
+- **1,000-Record Benchmark:** 1,000 transactions reconciled in 0.21s (~4,800 records/sec) with transparent score distributions.
 
 ---
 
@@ -301,6 +309,130 @@ python scripts/benchmark_day3.py
 
 ---
 
+## Day 4 — Intelligent Ledger Reconciliation
+
+Day 4 delivers the first real financial intelligence module: an explainable, deterministic ledger reconciliation engine that deterministically matches incoming transactions against general ledger accounting entries with zero non-deterministic dependencies.
+
+```text
+Transaction Ingestion
+         │
+         ▼
+TRANSACTION_RECONCILIATION_REQUESTED
+         │
+         ▼
+   Ledger Repository (SQLite Lookup: by tx_id / reference_id)
+         │
+         ▼
+   Reconciliation Engine (Deterministic Rules & Weighted Scoring)
+         ├───────────────────────────────────┐
+         ▼                                   ▼
+Match / Mismatch Evaluation         Explainable Evidence Generation
+         │                                   │
+         └─────────────────┬─────────────────┘
+                           ▼
+                  ReconciliationResult
+                 (Status, Score, Fields)
+                           │
+                           ▼
+               Save to SQLite Audit Store
+                           │
+                           ▼
+                 TRANSACTION_RECONCILED
+                           │
+                           ▼
+                  Workflow Stage Update (reconciliation -> COMPLETED)
+```
+
+### Deterministic Financial Architecture Pillars
+
+1. **Deterministic Matching (Zero LLMs / Zero ML):**
+   - Financial ledger matching requires exact explainability, repeatability, and legal auditability.
+   - Strictly avoids non-deterministic LLMs, prompt drift, and opaque black-box classifiers.
+   - Evaluates 7 core banking criteria: Transaction ID, Reference ID, Account ID, Decimal Amount, ISO 4217 Currency, Timestamp Tolerance, and Logical Debit/Credit Direction.
+
+2. **Weighted Reconciliation Scoring:**
+   - Transparent, configurable scoring matrix summing to exactly 1.0 (100%):
+     - **Transaction ID / Reference:** 30%
+     - **Account ID:** 20%
+     - **Amount:** 25%
+     - **Currency:** 10%
+     - **Timestamp Tolerance:** 10%
+     - **Debit/Credit Direction:** 5%
+   - Normalized score bounded within `[0.0, 1.0]`.
+   - Discrete status classification:
+     - `MATCHED`: Score >= 0.95 with 0 mismatched fields.
+     - `PARTIAL_MATCH`: Score >= 0.50 (e.g. amount variance or timestamp delta).
+     - `MISMATCHED`: Score < 0.50 (compound field discrepancies).
+     - `NOT_FOUND`: Candidate ledger record absent from core repository.
+
+3. **Decimal Financial Precision (No Floating-Point Equality):**
+   - IEEE 754 standard floating-point representation (`float`) introduces precision drift (e.g. `0.1 + 0.2 != 0.3`).
+   - All monetary fields in `reconciliation/rules.py` are converted to Python `Decimal` with banker's rounding (`ROUND_HALF_EVEN`) to 2 decimal places before equality checks.
+
+4. **Timestamp Tolerance Window:**
+   - General ledger postings often experience asynchronous network/batch latency relative to transaction authorization.
+   - Configurable tolerance window (default: 300 seconds / 5 minutes). Postings within this window are evaluated as a match; outliers trigger a timestamp mismatch record.
+
+5. **Mismatch Detection & Reasoning:**
+   - Explicit failure categorization: captures specific mismatch reasons such as `Amount mismatch: tx=1500.00 USD, ledger=1400.00 USD (diff: 100.00 USD)`, `Currency mismatch`, `Account mismatch`, and `Timestamp outside tolerance`.
+
+6. **Explainable Evidence Generation:**
+   - Generates auditable JSON evidence blocks for every evaluated rule:
+     ```json
+     {
+       "field": "amount",
+       "match": true,
+       "message": "Exact amount match: 1500.00 USD"
+     }
+     ```
+
+7. **Clean Architectural Separation:**
+   ```text
+   Models (ReconciliationResult, Transaction, LedgerEntry)
+     ↓
+   Rules (Deterministic evaluators & Decimal conversions)
+     ↓
+   Engine (Stateless ReconciliationEngine)
+     ↓
+   Repository (LedgerRepository SQLite abstraction)
+     ↓
+   Service (ReconciliationService coordinator & event publisher)
+     ↓
+   Event Orchestrator (TRANSACTION_RECONCILED emission & workflow update)
+     ↓
+   API (FastAPI endpoints)
+   ```
+
+### Day 4 REST API Endpoints
+
+- **`POST /reconciliation/run`:** Trigger reconciliation for an ingested transaction ID.
+  ```json
+  // Request
+  { "transaction_id": "TXN-000001" }
+
+  // Response
+  {
+    "reconciliation_id": "84fc90f7-9204-4e48-8dfa-8aa47b998dfc",
+    "transaction_id": "TXN-000001",
+    "ledger_entry_id": "LEDGER-000001",
+    "status": "MATCHED",
+    "score": 1.0,
+    "matched_fields": ["transaction_id", "account_id", "amount", "currency", "timestamp", "direction"],
+    "mismatched_fields": [],
+    "mismatch_reasons": [],
+    "evidence": [...]
+  }
+  ```
+- **`GET /reconciliation/{reconciliation_id}`:** Retrieve stored reconciliation result and audit trail evidence.
+- **`GET /reconciliation/metrics`:** Query live reconciliation telemetry (`total`, `matched`, `partial_match`, `mismatched`, `not_found`, `average_score`).
+
+### Running the 1,000-Record Reconciliation Benchmark
+```powershell
+python scripts/benchmark_day4.py
+```
+
+---
+
 ## Directory Structure
 
 ```
@@ -329,6 +461,11 @@ ZT-LedgerGuard/
 ├── reconciliation/
 │   ├── __init__.py
 │   ├── models.py                   # Transaction & LedgerEntry Pydantic models
+│   ├── reconciliation_result.py    # ReconciliationResult model & ReconciliationStatus enum
+│   ├── rules.py                    # 7 deterministic rules, weights & Decimal arithmetic
+│   ├── engine.py                   # Stateless ReconciliationEngine & scoring
+│   ├── ledger_repository.py        # LedgerRepository SQLite persistence abstraction
+│   ├── reconciliation_service.py   # ReconciliationService orchestration & event dispatcher
 │   └── transaction_service.py      # TransactionService ingestion coordinator
 │
 ├── fraud_detection/
@@ -345,22 +482,25 @@ ZT-LedgerGuard/
 │
 ├── database/
 │   ├── __init__.py
-│   └── database.py                 # SQLite persistence & queries
+│   └── database.py                 # SQLite persistence, tables & queries
 │
 ├── data/
 │   ├── __init__.py
-│   └── transaction_generator.py    # Deterministic synthetic transaction generator
+│   ├── transaction_generator.py    # Deterministic synthetic transaction generator
+│   └── ledger_generator.py         # Synthetic core ledger generator (controlled scenarios)
 │
 ├── tests/
 │   ├── __init__.py
 │   ├── test_foundation.py          # Day 1 test suite (18 tests)
 │   ├── test_day2.py                # Day 2 test suite (20 tests)
-│   └── test_day3.py                # Day 3 test suite (25 tests)
+│   ├── test_day3.py                # Day 3 test suite (25 tests)
+│   └── test_day4.py                # Day 4 test suite (35 tests)
 │
 ├── scripts/
 │   ├── __init__.py
 │   ├── run_transaction_stream.py   # Day 2 streaming CLI
-│   └── benchmark_day3.py           # Day 3 100-transaction benchmark
+│   ├── benchmark_day3.py           # Day 3 100-transaction benchmark
+│   └── benchmark_day4.py           # Day 4 1,000-record reconciliation benchmark
 │
 ├── docs/
 │   ├── architecture.md

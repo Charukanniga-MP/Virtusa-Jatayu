@@ -131,9 +131,59 @@ TRANSACTION_RECONCILED       FRAUD_ANALYSIS_COMPLETED
 
 ---
 
-## 4. Component Status Matrix (Day 1, 2, 3 vs. Planned)
+## 4. Day 4 Intelligent Ledger Reconciliation Architecture
 
-| Component | Status | Day 1–3 Implementation Scope | Planned Full Scope (Days 4–15) |
+Day 4 introduces an explainable, deterministic ledger reconciliation engine that evaluates whether an authorized banking transaction corresponds to an entry in the core general ledger.
+
+```text
+Transaction
+     |
+     v
+Reconciliation Request
+     |
+     v
+Ledger Repository
+     |
+     v
+Reconciliation Engine
+     |
+     +-------------------+
+     |                   |
+     v                   v
+Match Evaluation     Evidence
+     |
+     v
+Reconciliation Result
+     |
+     v
+TRANSACTION_RECONCILED
+```
+
+### Deterministic Financial Guarantee
+**The financial decision engine is deterministic and does not depend on an LLM.**
+
+Core banking systems demand absolute reproducibility, sub-millisecond execution times, zero hallucination risk, and auditable calculation logic for financial regulators (SOX, Basel III, PCI-DSS). The reconciliation engine operates via stateless mathematical and rule evaluations with no machine learning models or probabilistic prompt inferences.
+
+### Multi-Rule Weighted Evaluation
+The engine evaluates seven deterministic banking rules with configurable weights summing to 100%:
+
+| Rule | Evaluated Fields | Weight | Deterministic Criteria |
+| :--- | :--- | :--- | :--- |
+| **Rule 1 & 2** | `transaction_id`, `reference_id` | 30% | Strong match if either direct ID or reference ID aligns. |
+| **Rule 3** | `account_id` | 20% | Exact equality between transaction account and ledger account. |
+| **Rule 4** | `amount` | 25% | Exact financial equality using `Decimal` arithmetic. |
+| **Rule 5** | `currency` | 10% | Strict ISO 4217 code equality. |
+| **Rule 6** | `timestamp` | 10% | Posting time delta within configurable tolerance (`TIMESTAMP_TOLERANCE_SECONDS = 300`). |
+| **Rule 7** | `direction` | 5% | Logical compatibility between transaction type and ledger debit/credit side. |
+
+### Strict Decimal Money Representation
+Floating-point arithmetic (IEEE 754) is strictly prohibited for monetary values due to fractional binary conversion anomalies (`0.1 + 0.2 != 0.3`). All amounts in the reconciliation engine are parsed to Python `Decimal` objects quantized to two decimal places with banker's rounding (`ROUND_HALF_EVEN`) before comparison and variance calculation.
+
+---
+
+## 5. Component Status Matrix (Day 1, 2, 3 & 4 vs. Planned)
+
+| Component | Status | Day 1–4 Implementation Scope | Planned Full Scope (Days 5–15) |
 | :--- | :--- | :--- | :--- |
 | **Transaction Sources** | **IMPLEMENTED (Day 2)** | Deterministic synthetic generator `TransactionGenerator` with multi-channel and multi-currency simulation. | Continuous streaming load injector with anomaly burst modes. |
 | **Event Ingestion Layer** | **IMPLEMENTED (Day 2)** | `TransactionService` coordinating validation, SQLite persistence, and decoupled event publishing via `POST /transactions` and `POST /transactions/simulate`. | Distributed streaming ingestion gateways with TLS token authentication. |
@@ -141,8 +191,8 @@ TRANSACTION_RECONCILED       FRAUD_ANALYSIS_COMPLETED
 | **Event Orchestrator** | **IMPLEMENTED (Day 3)** | Decoupled event bus with dynamic handler registry (`register_handler`, `unregister_handler`), idempotency deduplication (`_processed_event_ids`), bounded retries (`MAX_EVENT_RETRIES`), sync/async non-blocking handler support, and full audit trail. | Distributed Apache Kafka topics, consumer groups, partition management, DLQs. |
 | **Workflow State Tracker** | **IMPLEMENTED (Day 3)** | Thread-safe `WorkflowTracker` tracking status (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`) and stage breakdowns (`validation`, `reconciliation`, `fraud_analysis`, `risk_analysis`, `final_decision`). | Persistent Redis / distributed state cache with timeout monitors. |
 | **Event Audit Trail** | **IMPLEMENTED (Day 3)** | Thread-safe `EventAuditTrail` capturing immutable records with statuses (`RECEIVED`, `PROCESSING`, `COMPLETED`, `FAILED`, `DUPLICATE`) and causation lineage. | Append-only cryptographically signed ledger audit log (Day 8). |
-| **Processing Pipeline** | **IMPLEMENTED (Day 3)** | `ProcessingPipeline` chaining canonical banking event stages with placeholder execution results. | Full multi-agent evaluation pipeline with AI scoring and consensus. |
-| **Reconciliation Agent** | **PLANNED** | Placeholder acknowledgment handler and validated `LedgerEntry` model. | Deterministic matching (Day 4) and fuzzy reconciliation algorithms (Day 5). |
+| **Processing Pipeline** | **IMPLEMENTED (Day 3-4)** | `ProcessingPipeline` chaining canonical banking event stages, now dynamically invoking `ReconciliationService` on reconciliation requests. | Full multi-agent evaluation pipeline with AI scoring and consensus. |
+| **Reconciliation Engine** | **IMPLEMENTED (Day 4)** | Deterministic `ReconciliationEngine`, 7 banking rules, Decimal financial arithmetic, explainable evidence generation, `LedgerRepository`, `LedgerGenerator`, and REST APIs. | Fuzzy reconciliation algorithms, multi-account splits, and out-of-order resolution (Day 5). |
 | **Fraud Agent** | **PLANNED** | Placeholder handler and schema foundation in `fraud_detection/models.py`. | Real-time feature extraction, velocity checking, ML anomaly scoring (Day 6). |
 | **Risk Agent** | **PLANNED** | Directory initialized (`agents/risk_agent`). | Multi-agent risk profiling & aggregate score weighting (Day 7). |
 | **Decision Engine** | **PLANNED** | Placeholder disposition handler (`TRANSACTION_APPROVED`). | Multi-agent consensus engine and automated disposition logic (Day 7). |
@@ -150,8 +200,8 @@ TRANSACTION_RECONCILED       FRAUD_ANALYSIS_COMPLETED
 | **Investigation Queue** | **PLANNED** | Not implemented today. | Alert queuing, operator review hooks, and case management (Day 11). |
 | **Security Layer** | **IMPLEMENTED (Day 1)** | Account ID masking (`mask_account_id`), log sanitization, zero-trust log hygiene. | Mutual TLS, cryptographic signing, API gateway policies (Day 8). |
 | **Privacy Layer** | **PLANNED** | Zero-trust logging rule: strict ban on raw PII / account numbers in logs. | Differential privacy queries and cryptographic data tokenization (Day 8). |
-| **Database** | **IMPLEMENTED (Day 1-2)** | Local SQLite engine with idempotent schemas and sequence auto-detection for transactions & ledger records. | PostgreSQL / TimescaleDB support with high-throughput indexing (Day 8+). |
-| **Monitoring & Telemetry** | **IMPLEMENTED (Day 3)** | Structured logging + extended live `EventOrchestrator` execution metrics (`GET /events/metrics`) and audit traces (`GET /events/{correlation_id}`). | Distributed OpenTelemetry tracing and Prometheus metric exporters (Day 12). |
+| **Database** | **IMPLEMENTED (Day 1-4)** | Local SQLite engine with idempotent schemas for transactions, ledger entries, and reconciliation results. | PostgreSQL / TimescaleDB support with high-throughput indexing (Day 8+). |
+| **Monitoring & Telemetry** | **IMPLEMENTED (Day 3-4)** | Structured logging + extended live `EventOrchestrator` execution metrics, audit traces, and reconciliation metrics (`GET /reconciliation/metrics`). | Distributed OpenTelemetry tracing and Prometheus metric exporters (Day 12). |
 | **Dashboard** | **PLANNED** | Directory initialized (`dashboard/`). | Real-time operator triage console and reconciliation metrics UI (Day 11). |
 
 
